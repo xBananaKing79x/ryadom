@@ -33,6 +33,8 @@ test("keeps MCP writes server-side and explicitly allowlisted", async () => {
   ]);
   assert.match(route, /const allowedTools = new Set/);
   assert.match(route, /"create_product"/);
+  assert.match(route, /result\.isError/);
+  assert.match(route, /status: 422/);
   assert.match(route, /Authorization: `Bearer \$\{token\}`/);
   assert.doesNotMatch(app, /MCP_API_TOKEN|Authorization:\s*["'`]Bearer/i);
   assert.match(app, /"create_order"/);
@@ -42,4 +44,11 @@ test("keeps MCP writes server-side and explicitly allowlisted", async () => {
   assert.match(app, /ryadom:read-messages/);
   assert.ok(image.byteLength > 100_000);
   assert.ok(templateRoot.pathname.endsWith("/new-chat/"));
+});
+
+test("uses the image MIME type required by the marketplace", async () => {
+  const source = await readFile(new URL("../app/MarketplaceApp.tsx", import.meta.url), "utf8");
+  assert.match(source, /content_type: file\.type/);
+  assert.match(source, /5 \* 1024 \* 1024/);
+  assert.doesNotMatch(source, /file\.type\.replace\("image\/"/);
 });

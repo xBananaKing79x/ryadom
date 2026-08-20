@@ -78,6 +78,10 @@ export async function POST(request: Request) {
         arguments: (body.arguments ?? {}) as Record<string, unknown>,
       });
     });
+    if (result.isError) {
+      const message = result.content.find((item) => item.type === "text" && "text" in item)?.text;
+      return NextResponse.json({ error: message || "Платформа отклонила операцию" }, { status: 422 });
+    }
     return NextResponse.json({ result });
   } catch (reason) {
     return NextResponse.json({ error: publicError(reason) }, { status: 502 });

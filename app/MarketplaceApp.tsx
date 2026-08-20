@@ -9,7 +9,7 @@ type Order = { id: string; product_id?: string; product?: Product; buyer_id?: st
 type Message = { id: string; sender_id?: string; receiver_id?: string; text: string; created_at?: string; product_id?: string; order_id?: string };
 type InboxMessage = Message & { product_id: string; productTitle: string };
 type ImageRecord = { id?: string; url?: string; alt_text?: string };
-type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown };
+type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown; isError?: boolean };
 type Panel = "profile" | "products" | "orders" | "messages" | "product" | "create" | "edit" | null;
 
 const categories = [
@@ -25,15 +25,24 @@ function unwrap<T>(result?: McpResult): T {
   if (value) return ((value.result ?? value.items ?? value) as T);
   const text = result?.content?.find((item) => item.type === "text")?.text;
   if (!text) return [] as T;
-  const parsed = JSON.parse(text) as Record<string, unknown> | T;
+  let parsed: Record<string, unknown> | T;
+  try { parsed = JSON.parse(text) as Record<string, unknown> | T; }
+  catch { return text as T; }
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return ((parsed.result ?? parsed.items ?? parsed) as T);
   return parsed as T;
 }
 
 async function mcpCall<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
   const response = await fetch("/api/mcp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, arguments: args }) });
-  const payload = (await response.json()) as { result?: McpResult; error?: string };
+  const responseText = await response.text();
+  let payload: { result?: McpResult; error?: string };
+  try { payload = JSON.parse(responseText) as typeof payload; }
+  catch { throw new Error(response.ok ? "Платформа вернула некорректный ответ" : responseText || "Не удалось получить ответ платформы"); }
   if (!response.ok) throw new Error(payload.error || "Не удалось получить ответ платформы");
+  if (payload.result?.isError) {
+    const message = payload.result.content?.find((item) => item.type === "text")?.text;
+    throw new Error(message || "Платформа отклонила операцию");
+  }
   return unwrap<T>(payload.result);
 }
 
@@ -48,10 +57,13 @@ function shortDate(value?: string) {
 }
 
 async function filePayload(file: File) {
+  const allowedTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+  if (!allowedTypes.has(file.type)) throw new Error("Выберите изображение JPEG, PNG или WebP");
+  if (file.size > 5 * 1024 * 1024) throw new Error("Фотография должна быть не больше 5 МБ");
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file);
   });
-  return { image_base64: dataUrl.split(",")[1], content_type: file.type.replace("image/", "") };
+  return { image_base64: dataUrl.split(",")[1], content_type: file.type };
 }
 
 function Modal({ title, eyebrow, close, children, wide = false }: { title: string; eyebrow: string; close: () => void; children: ReactNode; wide?: boolean }) {
