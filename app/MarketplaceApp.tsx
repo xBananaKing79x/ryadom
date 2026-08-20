@@ -23,6 +23,10 @@ const categoryNames = Object.fromEntries(categories.map(([value, label]) => [val
 const statusNames: Record<string, string> = { ACTIVE: "Активно", RESERVED: "Зарезервировано", SOLD: "Продано", REMOVED: "Снято", CREATED: "Создан", ACCEPTED: "Подтверждён", CANCELLED: "Отменён", COMPLETED: "Завершён" };
 const agentGreeting: AgentMessage = { role: "assistant", content: "Помогу найти товар или разобраться с заказами. Опишите задачу — я уточню категорию, бюджет и другие важные параметры." };
 
+function visibleOwnProducts(list: Product[]) {
+  return list.filter((product) => product.status?.toUpperCase() !== "REMOVED");
+}
+
 function unwrap<T>(result?: McpResult): T {
   const value = result?.structuredContent as Record<string, unknown> | undefined;
   if (value) return ((value.result ?? value.items ?? value) as T);
@@ -215,7 +219,7 @@ export function MarketplaceApp() {
 
   async function openMyProducts() {
     setPanel("products"); setPanelLoading(true); setActionError("");
-    try { const list = await mcpCall<Product[]>("get_my_products", { limit: 50 }); setMyProducts(Array.isArray(list) ? list : []); void hydrateImages(Array.isArray(list) ? list : [], "mine"); }
+    try { const list = await mcpCall<Product[]>("get_my_products", { limit: 50 }); const visible = visibleOwnProducts(Array.isArray(list) ? list : []); setMyProducts(visible); void hydrateImages(visible, "mine"); }
     catch (reason) { setActionError(reason instanceof Error ? reason.message : "Не удалось загрузить продукты"); } finally { setPanelLoading(false); }
   }
 
@@ -423,7 +427,13 @@ export function MarketplaceApp() {
 
   async function removeProduct(product: Product) {
     if (!window.confirm(`Снять объявление «${product.title}» с площадки?`)) return;
-    setActing(true); try { await mcpCall("remove_product", { product_id: product.id }); showToast("Объявление снято"); await openMyProducts(); }
+    setActing(true); setActionError(""); try {
+      await mcpCall("remove_product", { product_id: product.id });
+      setMyProducts((current) => current.filter((item) => item.id !== product.id));
+      setSellingProducts((current) => current.filter((item) => item.id !== product.id));
+      setProducts((current) => current.filter((item) => item.id !== product.id));
+      showToast("Товар снят и удалён из списка");
+    }
     catch (reason) { setActionError(reason instanceof Error ? reason.message : "Не удалось снять объявление"); } finally { setActing(false); }
   }
 

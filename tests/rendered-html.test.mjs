@@ -42,6 +42,8 @@ test("keeps MCP writes server-side and explicitly allowlisted", async () => {
   assert.match(app, /notification-button/);
   assert.match(app, /Отметить все прочитанными/);
   assert.match(app, /ryadom:read-messages/);
+  assert.match(app, /product\.status\?\.toUpperCase\(\) !== "REMOVED"/);
+  assert.match(app, /setMyProducts\(\(current\) => current\.filter\(\(item\) => item\.id !== product\.id\)\)/);
   assert.ok(image.byteLength > 100_000);
   assert.ok(templateRoot.pathname.endsWith("/new-chat/"));
 });
