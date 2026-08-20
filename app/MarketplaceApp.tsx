@@ -8,6 +8,7 @@ type Profile = { id: string; first_name?: string; last_name?: string; created_at
 type Order = { id: string; product_id?: string; product?: Product; buyer_id?: string; seller_id?: string; status: string; created_at?: string };
 type Message = { id: string; sender_id?: string; receiver_id?: string; text: string; created_at?: string; product_id?: string; order_id?: string };
 type InboxMessage = Message & { product_id: string; productTitle: string };
+type AgentOffer = { message: Message; product: Product; order?: Order; offered_price?: number };
 type ImageRecord = { id?: string; url?: string; alt_text?: string };
 type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown; isError?: boolean };
 type AgentMessage = { role: "user" | "assistant"; content: string };
@@ -95,6 +96,7 @@ export function MarketplaceApp() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [myProducts, setMyProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [sellingProducts, setSellingProducts] = useState<Product[]>([]);
   const [orderRole, setOrderRole] = useState("all");
   const [selected, setSelected] = useState<Product | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -109,6 +111,8 @@ export function MarketplaceApp() {
   const [agentMessages, setAgentMessages] = useState<AgentMessage[]>([agentGreeting]);
   const [agentProducts, setAgentProducts] = useState<Product[]>([]);
   const [agentOrders, setAgentOrders] = useState<Order[]>([]);
+  const [agentOffers, setAgentOffers] = useState<AgentOffer[]>([]);
+  const [agentRelistCandidates, setAgentRelistCandidates] = useState<Product[]>([]);
   const [agentSending, setAgentSending] = useState(false);
   const [agentError, setAgentError] = useState("");
   const [agentButtonPosition, setAgentButtonPosition] = useState<{ x: number; y: number } | null>(null);
@@ -119,13 +123,13 @@ export function MarketplaceApp() {
     setToast(text); if (toastTimer.current) clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(""), 3500);
   }, []);
 
-  const hydrateImages = useCallback(async (list: Product[], target: "catalog" | "mine" = "catalog") => {
+  const hydrateImages = useCallback(async (list: Product[], target: "catalog" | "mine" | "selling" = "catalog") => {
     await Promise.all(list.slice(0, 16).map(async (product) => {
       try {
         const images = await mcpCall<ImageRecord[]>("get_product_images", { product_id: product.id });
         if (!images?.[0]?.url) return;
         const patch = (current: Product[]) => current.map((item) => item.id === product.id ? { ...item, image: images[0].url } : item);
-        if (target === "catalog") setProducts(patch); else setMyProducts(patch);
+        if (target === "catalog") setProducts(patch); else if (target === "mine") setMyProducts(patch); else setSellingProducts(patch);
       } catch { /* Изображение необязательно. */ }
     }));
   }, []);
@@ -217,7 +221,14 @@ export function MarketplaceApp() {
 
   async function openOrders(role = orderRole) {
     setPanel("orders"); setPanelLoading(true); setActionError("");
-    try { const list = await mcpCall<Order[]>("get_my_orders", { role, limit: 50 }); setOrders(Array.isArray(list) ? list : []); }
+    try {
+      const [list, products] = await Promise.all([
+        mcpCall<Order[]>("get_my_orders", { role, limit: 50 }),
+        role === "seller" ? mcpCall<Product[]>("get_my_products", { limit: 100 }) : Promise.resolve([] as Product[]),
+      ]);
+      setOrders(Array.isArray(list) ? list : []); setSellingProducts(Array.isArray(products) ? products : []);
+      if (role === "seller") void hydrateImages(Array.isArray(products) ? products : [], "selling");
+    }
     catch (reason) { setActionError(reason instanceof Error ? reason.message : "Не удалось загрузить заказы"); } finally { setPanelLoading(false); }
   }
 
@@ -250,13 +261,15 @@ export function MarketplaceApp() {
     try {
       const response = await fetch("/api/agent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messages: nextHistory }) });
       const responseText = await response.text();
-      let payload: { message?: string; products?: Product[]; orders?: Order[]; error?: string };
+      let payload: { message?: string; products?: Product[]; orders?: Order[]; offers?: AgentOffer[]; relist_candidates?: Product[]; error?: string };
       try { payload = JSON.parse(responseText) as typeof payload; }
       catch { throw new Error("Агент вернул некорректный ответ"); }
       if (!response.ok) throw new Error(payload.error || "Агент временно недоступен");
       setAgentMessages((current) => [...current, { role: "assistant", content: payload.message || "Готово." }].slice(-18));
       if (Array.isArray(payload.products) && payload.products.length) { setAgentProducts(payload.products); setAgentOrders([]); }
       if (Array.isArray(payload.orders) && payload.orders.length) { setAgentOrders(payload.orders); setAgentProducts([]); }
+      if (Array.isArray(payload.offers)) { setAgentOffers(payload.offers); if (payload.offers.length) { setAgentProducts([]); setAgentOrders([]); setAgentRelistCandidates([]); } }
+      if (Array.isArray(payload.relist_candidates)) { setAgentRelistCandidates(payload.relist_candidates); if (payload.relist_candidates.length) { setAgentProducts([]); setAgentOrders([]); setAgentOffers([]); } }
     } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось выполнить задачу"); }
     finally { setAgentSending(false); }
   }
@@ -290,6 +303,85 @@ export function MarketplaceApp() {
       setAgentMessages((current) => [...current, { role: "assistant", content: "Заказ подтверждён. Товар поставлен на холд, остальные активные заявки по нему отменены платформой." }].slice(-18));
       showToast("Заказ подтверждён — товар на холде");
     } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось подтвердить заказ"); }
+    finally { setActing(false); }
+  }
+
+  async function sendOfferReply(offer: AgentOffer, text: string) {
+    const args: Record<string, unknown> = { product_id: offer.product.id, receiver_id: offer.message.sender_id, text };
+    if (offer.order?.id) args.order_id = offer.order.id;
+    await mcpCall("send_message", args);
+  }
+
+  async function replyAboutAvailability(offer: AgentOffer) {
+    setActing(true); setAgentError("");
+    try {
+      const available = offer.product.status === "ACTIVE";
+      await sendOfferReply(offer, available ? `Здравствуйте! Да, «${offer.product.title}» доступен. Цена объявления — ${money(offer.product.price)}.` : `Здравствуйте! «${offer.product.title}» сейчас на холде. Я сообщу, если товар снова станет доступен.`);
+      showToast("Ответ покупателю отправлен");
+    } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось отправить ответ"); }
+    finally { setActing(false); }
+  }
+
+  async function requestOrderForOffer(offer: AgentOffer) {
+    setActing(true); setAgentError("");
+    try {
+      await sendOfferReply(offer, `Спасибо за предложение ${offer.offered_price ? money(offer.offered_price) : "цены"}. Чтобы продавец мог поставить товар в резерв, пожалуйста, создайте заказ из карточки товара.`);
+      showToast("Покупателю предложено создать заказ");
+    } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось отправить ответ"); }
+    finally { setActing(false); }
+  }
+
+  async function reserveAgentOffer(offer: AgentOffer) {
+    if (!offer.order || offer.order.status !== "CREATED") return;
+    const offered = offer.offered_price ?? Number(offer.product.price);
+    if (!window.confirm(`Поставить «${offer.product.title}» в резерв для согласования предложения ${money(offered)}? Это ещё не завершает продажу.`)) return;
+    setActing(true); setAgentError("");
+    try {
+      await mcpCall("accept_order", { order_id: offer.order.id });
+      await sendOfferReply(offer, `Товар поставлен в резерв. Ваше предложение ${money(offered)} передано продавцу на согласование. Продажа ещё не подтверждена.`);
+      setAgentOffers((current) => current.map((item) => item.order?.id === offer.order?.id ? { ...item, product: { ...item.product, status: "RESERVED" }, order: item.order ? { ...item.order, status: "ACCEPTED" } : item.order } : item));
+      showToast("Товар на холде — ждёт решения");
+    } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось поставить товар в резерв"); }
+    finally { setActing(false); }
+  }
+
+  async function approveAgentOffer(offer: AgentOffer) {
+    if (!offer.order || offer.order.status !== "ACCEPTED") return;
+    const offered = offer.offered_price ?? Number(offer.product.price);
+    if (!window.confirm(`Подтвердить продажу по согласованной в сообщениях цене ${money(offered)}?`)) return;
+    setActing(true); setAgentError("");
+    try {
+      await sendOfferReply(offer, `Продавец согласился продать товар за ${money(offered)}. Цена согласована в переписке. Завершаем сделку.`);
+      await mcpCall("complete_order", { order_id: offer.order.id });
+      setAgentOffers((current) => current.map((item) => item.order?.id === offer.order?.id ? { ...item, product: { ...item.product, status: "SOLD" }, order: item.order ? { ...item.order, status: "COMPLETED" } : item.order } : item));
+      showToast("Продажа завершена");
+    } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось завершить продажу"); }
+    finally { setActing(false); }
+  }
+
+  async function declineAgentOffer(offer: AgentOffer) {
+    if (!offer.order || !["CREATED", "ACCEPTED"].includes(offer.order.status)) return;
+    if (!window.confirm("Отклонить предложение? Если товар был на холде, он снова станет доступен.")) return;
+    setActing(true); setAgentError("");
+    try {
+      await sendOfferReply(offer, `Спасибо за предложение. Цена товара выше — ${money(offer.product.price)}. Предложение отклонено, резерв снят.`);
+      await mcpCall("cancel_order", { order_id: offer.order.id });
+      setAgentOffers((current) => current.map((item) => item.order?.id === offer.order?.id ? { ...item, product: { ...item.product, status: "ACTIVE" }, order: item.order ? { ...item.order, status: "CANCELLED" } : item.order } : item));
+      showToast("Предложение отклонено, резерв снят");
+    } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось отклонить предложение"); }
+    finally { setActing(false); }
+  }
+
+  async function relistPurchasedProduct(product: Product) {
+    const originalPrice = Number(product.price); const resalePrice = Math.round(originalPrice * 1.15 * 100) / 100;
+    if (!Number.isFinite(resalePrice) || resalePrice <= 0) { setAgentError("Не удалось рассчитать цену перепродажи"); return; }
+    if (!window.confirm(`Выставить «${product.title}» за ${money(resalePrice)} — на 15% выше цены покупки?`)) return;
+    setActing(true); setAgentError("");
+    try {
+      await mcpCall("create_product", { title: product.title, description: `${product.description || "Купленный товар"}\n\nПовторно выставлено через агента «Рядом».`, price: resalePrice, category: product.category });
+      setAgentRelistCandidates((current) => current.filter((item) => item.id !== product.id));
+      showToast("Товар выставлен с наценкой 15%");
+    } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось выставить товар"); }
     finally { setActing(false); }
   }
 
@@ -404,10 +496,12 @@ export function MarketplaceApp() {
     {(panel === "create" || panel === "edit") && <Modal eyebrow={panel === "edit" ? "Редактирование" : "Новое объявление"} title={panel === "edit" ? "Обновить продукт" : "Добавить продукт"} close={() => setPanel(null)}><form className="product-form" onSubmit={createOrUpdateProduct}><label>Название<input name="title" minLength={3} maxLength={200} required defaultValue={panel === "edit" ? selected?.title : ""} placeholder="Например, торшер из дерева" /></label><label>Описание<textarea name="description" minLength={1} maxLength={5000} required defaultValue={panel === "edit" ? selected?.description : ""} placeholder="Состояние, комплект, детали передачи" /></label><div className="form-grid"><label>Цена, ₽<input name="price" type="number" min="0.01" step="0.01" required defaultValue={panel === "edit" ? String(selected?.price || "") : ""} placeholder="2500" /></label><label>Категория<select name="category" required defaultValue={panel === "edit" ? selected?.category : "home"}>{categories.slice(1).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div><label className="file-field">Фотография<input name="image" type="file" accept="image/jpeg,image/png,image/webp" /><span>{panel === "edit" ? "Выберите новое фото, чтобы добавить его" : "JPEG, PNG или WebP"}</span></label>{actionError && <p className="inline-error">{actionError}</p>}<button className="submit-action" disabled={acting} type="submit">{acting ? "Сохраняем…" : panel === "edit" ? "Сохранить изменения" : "Опубликовать продукт"}</button></form></Modal>}
 
     {panel === "agent" && <Modal eyebrow="DeepSeek × MCP" title="Агент по покупкам" wide close={() => setPanel(null)}><div className="agent-shell">
-      <aside className="agent-aside"><div className="agent-orb" aria-hidden="true">✦</div><strong>Что поручить?</strong><p>Агент уточнит запрос, найдёт реальные объявления и подготовит безопасное действие.</p><div className="agent-prompts"><button onClick={() => void runAgentTask("Хочу найти товар. Спроси у меня категорию, бюджет и важные параметры.")} type="button">Найти товар</button><button onClick={() => void runAgentTask("Найди товары в статусе RESERVED — на холде. Сначала уточни, что именно искать.")} type="button">Поиск на холде</button><button onClick={() => void runAgentTask("Покажи мои входящие заказы со статусом CREATED и помоги выбрать лучший доступный.")} type="button">Разобрать заказы</button></div><small>Действия выполняются только после вашего подтверждения.</small></aside>
+      <aside className="agent-aside"><div className="agent-orb" aria-hidden="true">✦</div><strong>Что поручить?</strong><p>Агент уточнит запрос, найдёт реальные объявления и подготовит безопасное действие.</p><div className="agent-prompts"><button onClick={() => void runAgentTask("Хочу найти товар. Спроси у меня категорию, бюджет и важные параметры.")} type="button">Найти товар</button><button onClick={() => void runAgentTask("Найди товары в статусе RESERVED — на холде. Сначала уточни, что именно искать.")} type="button">Поиск на холде</button><button onClick={() => void runAgentTask("Проверь входящие сообщения по моим товарам, вопросы о доступности и предложения торга.")} type="button">Сообщения и торг</button><button onClick={() => void runAgentTask("Покажи мои входящие заказы со статусом CREATED и помоги выбрать лучший доступный.")} type="button">Разобрать заказы</button><button onClick={() => void runAgentTask("Покажи завершённые покупки, которые можно выставить на продажу с наценкой 15%.")} type="button">Перепродать +15%</button></div><small>Действия выполняются только после вашего подтверждения.</small></aside>
       <section className="agent-workspace"><div className="agent-chat" aria-live="polite">{agentMessages.map((message, index) => <article className={`agent-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "assistant" ? "Р" : "Вы"}</span><p>{message.content}</p></article>)}{agentSending && <article className="agent-message assistant thinking"><span>Р</span><p>Ищу и сравниваю…</p></article>}</div>
         {agentError && <p className="inline-error">{agentError}</p>}
         {agentProducts.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Найденные предложения</strong><span>{agentProducts.length}</span></div><div className="agent-product-strip">{agentProducts.map((product) => <article className="agent-product-card" key={product.id}><button className={`agent-product-image category-${product.category}`} onClick={() => { setSelected(product); setPanel("product"); }} type="button">{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Товар"}</span>}<i>{statusNames[product.status || "ACTIVE"] || product.status}</i></button><div><small>{categoryNames[product.category] || product.category}</small><h3>{product.title}</h3><strong>{money(product.price)}</strong><div className="agent-card-actions"><button onClick={() => { setSelected(product); setPanel("product"); }} type="button">Карточка</button>{product.status === "ACTIVE" && <button disabled={acting} onClick={() => void createAgentOrder(product)} type="button">Создать заказ</button>}</div></div></article>)}</div></div>}
+        {agentOffers.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Сообщения и предложения</strong><span>{agentOffers.length}</span></div><div className="agent-offer-list">{agentOffers.map((offer) => { const listed = Number(offer.product.price); const belowPrice = offer.offered_price !== undefined && offer.offered_price < listed; return <article className={belowPrice ? "agent-offer below-price" : "agent-offer"} key={offer.message.id}><div className="agent-offer-head"><div><span className={`status-badge status-${offer.product.status?.toLowerCase()}`}>{statusNames[offer.product.status || "ACTIVE"]}</span><strong>{offer.product.title}</strong></div><div><small>Цена объявления</small><strong>{money(offer.product.price)}</strong></div></div><blockquote>{offer.message.text}</blockquote>{offer.offered_price !== undefined && <div className="agent-price-check"><span>Предложение покупателя</span><strong>{money(offer.offered_price)}</strong>{belowPrice && <i>ниже на {money(listed - offer.offered_price)}</i>}</div>}<div className="agent-offer-actions"><button disabled={acting} onClick={() => void replyAboutAvailability(offer)} type="button">Ответить о наличии</button>{!offer.order && offer.offered_price !== undefined && <button disabled={acting} onClick={() => void requestOrderForOffer(offer)} type="button">Попросить создать заказ</button>}{offer.order?.status === "CREATED" && <button disabled={acting} onClick={() => void reserveAgentOffer(offer)} type="button">Поставить в резерв</button>}{offer.order?.status === "ACCEPTED" && <button disabled={acting} onClick={() => void approveAgentOffer(offer)} type="button">Разрешить продажу</button>}{offer.order && ["CREATED", "ACCEPTED"].includes(offer.order.status) && <button className="danger-action" disabled={acting} onClick={() => void declineAgentOffer(offer)} type="button">Отказать</button>}</div></article>; })}</div><p className="agent-order-note">Временный режим: предложенная цена фиксируется в сообщениях. MCP-заказ по-прежнему хранит цену объявления.</p></div>}
+        {agentRelistCandidates.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>К перепродаже с наценкой 15%</strong><span>{agentRelistCandidates.length}</span></div><div className="agent-product-strip">{agentRelistCandidates.map((product) => <article className="agent-product-card" key={product.id}><div className={`agent-product-image category-${product.category}`}>{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Товар"}</span>}<i>Куплено</i></div><div><small>{categoryNames[product.category] || product.category}</small><h3>{product.title}</h3><strong>{money(Math.round(Number(product.price) * 1.15 * 100) / 100)}</strong><div className="agent-card-actions single"><button disabled={acting} onClick={() => void relistPurchasedProduct(product)} type="button">Выставить на продажу</button></div></div></article>)}</div></div>}
         {agentSortedOrders.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Входящие заказы</strong><span>{agentSortedOrders.length}</span></div><div className="agent-order-list">{agentSortedOrders.map((order) => <article className={order.id === bestAgentOrderId ? "agent-order recommended" : "agent-order"} key={order.id}><div>{order.id === bestAgentOrderId && <span className="agent-recommendation">Рекомендация агента</span>}<strong>{order.product?.title || `Заказ ${order.id.slice(0, 8)}`}</strong><small>{statusNames[order.status] || order.status} · {shortDate(order.created_at)}</small></div><div><strong>{order.product ? money(order.product.price) : "Цена объявления"}</strong>{order.status === "CREATED" && <button disabled={acting} onClick={() => void acceptAgentOrder(order)} type="button">Подтвердить</button>}</div></article>)}</div><p className="agent-order-note">MCP не хранит отдельную цену предложения: сравнение выполняется по цене объявления. При равенстве агент не обещает несуществующую выгоду.</p></div>}
         <form className="agent-composer" onSubmit={submitAgentTask}><textarea aria-label="Задача агенту" disabled={agentSending} enterKeyHint="send" name="agent_task" required maxLength={4000} placeholder="Например: найди городской велосипед до 35 000 ₽…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (event.currentTarget.value.trim()) event.currentTarget.form?.requestSubmit(); } }} /><button disabled={agentSending} type="submit">{agentSending ? "Думаю…" : "Отправить ↗"}</button></form>
       </section>
@@ -415,7 +509,7 @@ export function MarketplaceApp() {
 
     {panel === "product" && selected && <Modal eyebrow={categoryNames[selected.category] || "Объявление"} title={selected.title} wide close={() => setPanel(null)}><div className="product-detail"><div className={`detail-image category-${selected.category}`}>{selected.image ? <img src={selected.image} alt={selected.title} /> : <span>{categoryNames[selected.category] || "Находка"}</span>}</div><div className="detail-copy"><span className="status-badge status-active">{statusNames[selected.status || "ACTIVE"]}</span><strong className="detail-price">{money(selected.price)}</strong><p>{selected.description || "Продавец пока не добавил описание."}</p><small>Объявление · {selected.id.slice(0, 8)}</small>{actionError && <p className="inline-error">{actionError}</p>}<div className="detail-actions"><button className="submit-action" disabled={acting} onClick={() => void createOrder(selected)} type="button">Создать заказ</button><button className="secondary-action" onClick={() => void openMessages({ productId: selected.id, productTitle: selected.title })} type="button">Написать продавцу</button></div></div></div></Modal>}
 
-    {panel === "orders" && <Modal eyebrow="Покупки и продажи" title="Мои заказы" wide close={() => setPanel(null)}><div className="panel-tabs">{[["all","Все"],["buyer","Покупаю"],["seller","Продаю"]].map(([value,label]) => <button className={orderRole === value ? "active" : ""} key={value} onClick={() => { setOrderRole(value); void openOrders(value); }} type="button">{label}</button>)}</div>{actionError && <p className="inline-error">{actionError}</p>}{panelLoading ? <div className="panel-loader">Загружаем заказы…</div> : orders.length === 0 ? <EmptyState title="Заказов пока нет" text="Откройте понравившееся объявление и создайте заказ." /> : <div className="order-list">{orders.map((order) => <article key={order.id}><div><span className={`status-badge status-${order.status.toLowerCase()}`}>{statusNames[order.status] || order.status}</span><h3>{order.product?.title || `Заказ ${order.id.slice(0, 8)}`}</h3><p>{shortDate(order.created_at)}</p></div><div className="item-actions">{order.status === "CREATED" && order.seller_id === profile?.id && <button disabled={acting} onClick={() => void changeOrder(order,"accept_order")} type="button">Подтвердить</button>}{order.status === "ACCEPTED" && <button disabled={acting} onClick={() => void changeOrder(order,"complete_order")} type="button">Завершить</button>}{["CREATED","ACCEPTED"].includes(order.status) && <button className="danger-action" disabled={acting} onClick={() => void changeOrder(order,"cancel_order")} type="button">Отменить</button>}<button onClick={() => void openMessages({ productId: order.product_id || order.product?.id || "", productTitle: order.product?.title, orderId: order.id })} type="button">Сообщения</button></div></article>)}</div>}</Modal>}
+    {panel === "orders" && <Modal eyebrow="Покупки и продажи" title="Мои заказы" wide close={() => setPanel(null)}><div className="panel-tabs">{[["all","Все"],["buyer","Покупаю"],["seller","Продаю"]].map(([value,label]) => <button className={orderRole === value ? "active" : ""} key={value} onClick={() => { setOrderRole(value); void openOrders(value); }} type="button">{label}</button>)}</div>{actionError && <p className="inline-error">{actionError}</p>}{panelLoading ? <div className="panel-loader">Загружаем заказы…</div> : <>{orderRole === "seller" && <section className="selling-products"><div className="subsection-heading"><div><span>Ваши объявления</span><strong>Выставлено на продажу</strong></div><span>{sellingProducts.length}</span></div>{sellingProducts.length === 0 ? <p className="subsection-empty">У вас пока нет выставленных товаров.</p> : <div className="selling-product-grid">{sellingProducts.map((product) => <article key={product.id}><button className={`selling-product-image category-${product.category}`} onClick={() => { setSelected(product); setPanel("product"); }} type="button">{product.image ? <img src={product.image} alt="" /> : categoryNames[product.category]}</button><div><span className={`status-badge status-${product.status?.toLowerCase()}`}>{statusNames[product.status || "ACTIVE"]}</span><strong>{product.title}</strong><small>{money(product.price)}</small></div><button onClick={() => void openMessages({ productId: product.id, productTitle: product.title })} type="button">Сообщения</button></article>)}</div>}</section>}{orders.length === 0 ? <EmptyState title={orderRole === "seller" ? "Входящих заказов пока нет" : "Заказов пока нет"} text={orderRole === "seller" ? "Ваши выставленные товары показаны выше. Новые предложения появятся здесь." : "Откройте понравившееся объявление и создайте заказ."} /> : <div className="order-list">{orders.map((order) => <article key={order.id}><div><span className={`status-badge status-${order.status.toLowerCase()}`}>{statusNames[order.status] || order.status}</span><h3>{order.product?.title || `Заказ ${order.id.slice(0, 8)}`}</h3><p>{shortDate(order.created_at)}</p></div><div className="item-actions">{order.status === "CREATED" && order.seller_id === profile?.id && <button disabled={acting} onClick={() => void changeOrder(order,"accept_order")} type="button">Подтвердить</button>}{order.status === "ACCEPTED" && <button disabled={acting} onClick={() => void changeOrder(order,"complete_order")} type="button">Завершить</button>}{["CREATED","ACCEPTED"].includes(order.status) && <button className="danger-action" disabled={acting} onClick={() => void changeOrder(order,"cancel_order")} type="button">Отменить</button>}<button onClick={() => void openMessages({ productId: order.product_id || order.product?.id || "", productTitle: order.product?.title, orderId: order.id })} type="button">Сообщения</button></div></article>)}</div>}</>}</Modal>}
 
     {panel === "messages" && <Modal eyebrow="Личные сообщения" title={messageContext.productTitle || "Сообщения"} wide close={() => setPanel(null)}><div className="conversation-setup"><label>ID продукта<input value={messageContext.productId} placeholder="Выберите товар или вставьте ID" onChange={(event) => setMessageContext({ ...messageContext, productId: event.target.value })} /></label><button disabled={!messageContext.productId || panelLoading} onClick={() => void openMessages()} type="button">Открыть диалог</button></div>{actionError && <p className="inline-error">{actionError}</p>}{panelLoading ? <div className="panel-loader">Загружаем переписку…</div> : !messageContext.productId ? <EmptyState title="Выберите объявление" text="Откройте карточку товара и нажмите «Написать продавцу» — или укажите ID продукта." /> : <><div className="message-list">{messages.length === 0 ? <EmptyState title="Диалог пока пуст" text="Начните разговор — уточните состояние или договоритесь о передаче." /> : messages.map((message) => <article className={message.sender_id === profile?.id ? "message mine" : "message"} key={message.id}><p>{message.text}</p><small>{shortDate(message.created_at)}</small></article>)}</div><form className="message-form" onSubmit={sendMessage}><textarea name="text" required maxLength={4000} placeholder="Напишите сообщение…" /><button disabled={acting} type="submit">{acting ? "…" : "Отправить ↗"}</button></form></>}</Modal>}
     <button className="floating-agent-button" style={agentButtonPosition ? { "--agent-x": `${agentButtonPosition.x}px`, "--agent-y": `${agentButtonPosition.y}px` } as CSSProperties : undefined} type="button" aria-label="Открыть агента. Кнопку можно перетащить" title="Агент — перетащите в удобное место" onPointerDown={beginAgentDrag} onPointerMove={moveAgentButton} onPointerUp={finishAgentDrag} onPointerCancel={() => { agentDrag.current = null; }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setPanel("agent"); setAgentError(""); } }}><span aria-hidden="true">✦</span><small>Агент</small></button>

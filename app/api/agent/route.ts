@@ -10,6 +10,8 @@ type DeepSeekMessage = { role: "system" | "user" | "assistant" | "tool"; content
 type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown; isError?: boolean };
 type Product = { id: string; title: string; description?: string; price: number | string; category: string; status?: string; seller_id?: string; image?: string };
 type Order = { id: string; product_id?: string; status: string; product?: Product; created_at?: string; buyer_id?: string; seller_id?: string };
+type Message = { id: string; product_id?: string; order_id?: string; sender_id?: string; receiver_id?: string; text: string; created_at?: string };
+type AgentOffer = { message: Message; product: Product; order?: Order; offered_price?: number };
 
 const mcpEndpoint = process.env.MCP_SERVER_URL || "https://ai-hackaton.ru/mcp";
 const allowedAgentTools = new Set(["search_products", "get_product", "get_my_products", "get_my_orders"]);
@@ -58,6 +60,22 @@ const tools = [
       parameters: { type: "object", properties: { role: { type: "string", enum: ["all", "buyer", "seller"] }, status: { type: "string", enum: ["CREATED", "ACCEPTED", "CANCELLED", "COMPLETED"] }, limit: { type: "integer", minimum: 1, maximum: 100 } } },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "inspect_sales_inbox",
+      description: "Проверить входящие сообщения по своим товарам, найти вопросы о доступности и предложения цены, связать их с заказами. Используй для разбора торга и сообщений покупателей.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "inspect_completed_purchases",
+      description: "Найти завершённые покупки текущего пользователя, которые можно повторно выставить с наценкой 15%.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
 ];
 
 const systemPrompt = `Ты — агент C2C-маркетплейса «Рядом». Отвечай по-русски, коротко и дружелюбно.
@@ -66,6 +84,8 @@ const systemPrompt = `Ты — агент C2C-маркетплейса «Ряд�
 ACTIVE — доступен для покупки, RESERVED — товар на холде, SOLD — продан, REMOVED — снят.
 После поиска кратко объясни выбор. Не выдумывай товары, цены, изображения, id и статусы.
 Ты не выполняешь денежные или изменяющие состояние действия самостоятельно. Карточки интерфейса дадут пользователю кнопки создания и подтверждения заказа.
+Если пользователь просит проверить сообщения, торг или предложения покупателей, обязательно вызови inspect_sales_inbox. Если просит перепродать купленные товары — inspect_completed_purchases.
+Цена, написанная покупателем в сообщении, является неформальным предложением. Никогда не называй её ценой заказа. Если она ниже цены объявления, предложи продавцу резерв и отдельное согласование; не заявляй, что продажа подтверждена.
 Текущий MCP не содержит цены предложения: все заказы создаются по цене объявления. После подтверждения заказ становится ACCEPTED, товар — RESERVED, остальные CREATED-заявки отменяются. Не обещай аукцион или приём новых заявок на RESERVED-товар. Если цены заказов равны, скажи об этом прямо.`;
 
 function unwrap<T>(result: McpResult): T {
@@ -88,13 +108,54 @@ async function withMcp<T>(operation: (client: Client) => Promise<T>) {
   finally { await client.close().catch(() => undefined); }
 }
 
-async function callMarketplaceTool(name: string, args: Record<string, unknown>) {
-  if (!allowedAgentTools.has(name)) throw new Error("Инструмент агенту недоступен");
+async function callChecked<T>(client: Client, name: string, args: Record<string, unknown> = {}) {
+  const result = await client.callTool({ name, arguments: args }) as McpResult;
+  if (result.isError) throw new Error(result.content?.find((item) => item.type === "text")?.text || "Платформа отклонила запрос");
+  return unwrap<T>(result);
+}
+
+function extractOfferPrice(text: string) {
+  const match = text.match(/(?:за|предлагаю|готов(?:а)?|куплю|дам|цена)[^\d]{0,24}(\d[\d\s,.]{1,14})\s*(?:₽|руб(?:л(?:ей|я)?)?)/i)
+    ?? text.match(/(\d[\d\s,.]{1,14})\s*(?:₽|руб(?:л(?:ей|я)?)?)/i);
+  if (!match) return undefined;
+  const value = Number(match[1].replace(/\s/g, "").replace(",", "."));
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+async function inspectSalesInbox() {
   return withMcp(async (client) => {
-    const result = await client.callTool({ name, arguments: args }) as McpResult;
-    if (result.isError) throw new Error(result.content?.find((item) => item.type === "text")?.text || "Платформа отклонила запрос");
-    return result;
+    const [profile, products, orders] = await Promise.all([
+      callChecked<{ id: string }>(client, "get_my_profile"),
+      callChecked<Product[]>(client, "get_my_products", { limit: 50 }),
+      callChecked<Order[]>(client, "get_my_orders", { role: "seller", limit: 100 }),
+    ]);
+    const productList = Array.isArray(products) ? products.filter((product) => ["ACTIVE", "RESERVED"].includes(product.status || "ACTIVE")) : [];
+    const orderList = Array.isArray(orders) ? orders : [];
+    const batches = await Promise.all(productList.slice(0, 24).map(async (product) => {
+      const messages = await callChecked<Message[]>(client, "get_messages", { product_id: product.id, limit: 50 }).catch(() => [] as Message[]);
+      return (Array.isArray(messages) ? messages : []).filter((message) => message.sender_id && message.sender_id !== profile.id).map((message): AgentOffer => {
+        const order = orderList.find((item) => item.product_id === product.id && item.buyer_id === message.sender_id && ["CREATED", "ACCEPTED"].includes(item.status));
+        return { message, product, order, offered_price: extractOfferPrice(message.text) };
+      });
+    }));
+    const offers = batches.flat().sort((left, right) => String(right.message.created_at || "").localeCompare(String(left.message.created_at || "")));
+    return { offers: offers.slice(0, 30), products: productList, orders: orderList };
   });
+}
+
+async function inspectCompletedPurchases() {
+  return withMcp(async (client) => {
+    const orders = await callChecked<Order[]>(client, "get_my_orders", { role: "buyer", status: "COMPLETED", limit: 100 });
+    const products = (Array.isArray(orders) ? orders : []).map((order) => order.product).filter((product): product is Product => Boolean(product?.id));
+    return { orders, products };
+  });
+}
+
+async function callAgentTool(name: string, args: Record<string, unknown>) {
+  if (name === "inspect_sales_inbox") return inspectSalesInbox();
+  if (name === "inspect_completed_purchases") return inspectCompletedPurchases();
+  if (!allowedAgentTools.has(name)) throw new Error("Инструмент агенту недоступен");
+  return withMcp((client) => callChecked<unknown>(client, name, args));
 }
 
 async function hydrateProducts(products: Product[]) {
@@ -126,6 +187,8 @@ export async function POST(request: Request) {
     const messages: DeepSeekMessage[] = [{ role: "system", content: systemPrompt }, ...history];
     let foundProducts: Product[] = [];
     let foundOrders: Order[] = [];
+    let foundOffers: AgentOffer[] = [];
+    let relistCandidates: Product[] = [];
     let finalText = "Не получилось сформировать ответ. Попробуйте уточнить запрос.";
 
     for (let step = 0; step < 5; step += 1) {
@@ -148,14 +211,22 @@ export async function POST(request: Request) {
         try { args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>; }
         catch { /* DeepSeek will receive the tool error and can recover. */ }
         try {
-          const result = await callMarketplaceTool(call.function.name, args);
-          const value = unwrap<unknown>(result);
+          const value = await callAgentTool(call.function.name, args);
           if (call.function.name === "search_products" || call.function.name === "get_my_products") {
             const list = Array.isArray(value) ? value as Product[] : [];
             foundProducts = await hydrateProducts(list);
           }
           if (call.function.name === "get_product" && value && !Array.isArray(value) && typeof value === "object") foundProducts = await hydrateProducts([value as Product]);
           if (call.function.name === "get_my_orders") foundOrders = Array.isArray(value) ? value as Order[] : [];
+          if (call.function.name === "inspect_sales_inbox" && value && typeof value === "object") {
+            const inspected = value as { offers?: AgentOffer[]; orders?: Order[] };
+            foundOffers = Array.isArray(inspected.offers) ? inspected.offers : [];
+            foundOrders = Array.isArray(inspected.orders) ? inspected.orders : [];
+          }
+          if (call.function.name === "inspect_completed_purchases" && value && typeof value === "object") {
+            const inspected = value as { products?: Product[] };
+            relistCandidates = await hydrateProducts(Array.isArray(inspected.products) ? inspected.products : []);
+          }
           messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(value).slice(0, 24000) });
         } catch (reason) {
           messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: safeError(reason) }) });
@@ -163,7 +234,7 @@ export async function POST(request: Request) {
       }
     }
 
-    return NextResponse.json({ message: finalText, products: foundProducts, orders: foundOrders });
+    return NextResponse.json({ message: finalText, products: foundProducts, orders: foundOrders, offers: foundOffers, relist_candidates: relistCandidates });
   } catch (reason) {
     return NextResponse.json({ error: safeError(reason) }, { status: 502 });
   }

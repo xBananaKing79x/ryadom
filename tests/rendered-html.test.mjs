@@ -62,6 +62,9 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(agentRoute, /deepseek-v4-flash/);
   assert.match(agentRoute, /search_products/);
   assert.match(agentRoute, /get_my_orders/);
+  assert.match(agentRoute, /inspect_sales_inbox/);
+  assert.match(agentRoute, /inspect_completed_purchases/);
+  assert.match(agentRoute, /extractOfferPrice/);
   assert.doesNotMatch(app, /DEEPSEEK_API_KEY|api\.deepseek\.com/);
   assert.match(app, /Агент по покупкам/);
   assert.match(app, /floating-agent-button/);
@@ -72,4 +75,9 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /requestSubmit\(\)/);
   assert.match(app, /createAgentOrder/);
   assert.match(app, /acceptAgentOrder/);
+  assert.match(app, /reserveAgentOffer/);
+  assert.match(app, /approveAgentOffer/);
+  assert.match(app, /declineAgentOffer/);
+  assert.match(app, /relistPurchasedProduct/);
+  assert.match(app, /Выставлено на продажу/);
 });
