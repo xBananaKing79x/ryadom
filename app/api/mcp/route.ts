@@ -5,6 +5,13 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 const endpoint = process.env.MCP_SERVER_URL || "https://ai-hackaton.ru/mcp";
+const allowedTools = new Set([
+  "get_my_profile", "get_profile", "summarize_marketplace_capabilities", "get_category_inspiration",
+  "search_products", "get_product", "get_my_products", "get_product_images", "get_product_image",
+  "create_product", "update_product", "remove_product", "add_product_image", "remove_product_image",
+  "get_messages", "send_message", "get_order", "get_my_orders", "create_order", "accept_order",
+  "cancel_order", "complete_order",
+]);
 
 function publicError(reason: unknown) {
   const token = process.env.MCP_API_TOKEN;
@@ -21,7 +28,7 @@ async function withMcp<T>(operation: (client: Client) => Promise<T>) {
   const token = process.env.MCP_API_TOKEN;
   if (!token) throw new Error("На сервере не задан MCP_API_TOKEN");
 
-  const client = new Client({ name: "c2c-web-smoke-test", version: "0.1.0" });
+  const client = new Client({ name: "ryadom-marketplace-web", version: "0.2.0" });
   const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
     requestInit: {
       headers: { Authorization: `Bearer ${token}` },
@@ -54,14 +61,14 @@ export async function POST(request: Request) {
     if (body.arguments !== undefined && (body.arguments === null || typeof body.arguments !== "object" || Array.isArray(body.arguments))) {
       return NextResponse.json({ error: "Аргументы должны быть JSON-объектом" }, { status: 400 });
     }
+    if (!allowedTools.has(body.name)) {
+      return NextResponse.json({ error: "Инструмент не разрешён web-интерфейсу" }, { status: 403 });
+    }
 
     const result = await withMcp(async (client) => {
       const availableTools = await client.listTools();
       const selectedTool = availableTools.tools.find((tool) => tool.name === body.name);
       if (!selectedTool) throw new Error("MCP-инструмент не найден");
-      if (!selectedTool.annotations?.readOnlyHint) {
-        throw new Error("В тестовом интерфейсе разрешены только read-only инструменты");
-      }
 
       return client.callTool({
         name: body.name as string,

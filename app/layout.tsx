@@ -2,8 +2,13 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Место — C2C-маркетплейс",
-  description: "Web-интерфейс C2C-платформы с подключением по MCP.",
+  title: "Рядом — всё нужное поблизости",
+  description: "Спокойный маркетплейс хороших находок. Покупайте и продавайте вещи людям рядом.",
+  openGraph: {
+    title: "Рядом — всё нужное поблизости",
+    description: "Покупайте и продавайте вещи людям рядом.",
+    images: [{ url: "/hero-marketplace.png", width: 1672, height: 941, alt: "Рядом — маркетплейс хороших находок" }],
+  },
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
