@@ -67,6 +67,9 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /floating-agent-button/);
   assert.doesNotMatch(app, /className="agent-nav-button"/);
   assert.match(app, /ryadom:agent-button-position/);
+  assert.match(app, /event\.key === "Enter"/);
+  assert.match(app, /!event\.shiftKey/);
+  assert.match(app, /requestSubmit\(\)/);
   assert.match(app, /createAgentOrder/);
   assert.match(app, /acceptAgentOrder/);
 });
