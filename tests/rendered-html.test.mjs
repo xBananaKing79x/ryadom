@@ -64,6 +64,9 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(agentRoute, /get_my_orders/);
   assert.doesNotMatch(app, /DEEPSEEK_API_KEY|api\.deepseek\.com/);
   assert.match(app, /Агент по покупкам/);
+  assert.match(app, /floating-agent-button/);
+  assert.doesNotMatch(app, /className="agent-nav-button"/);
+  assert.match(app, /ryadom:agent-button-position/);
   assert.match(app, /createAgentOrder/);
   assert.match(app, /acceptAgentOrder/);
 });

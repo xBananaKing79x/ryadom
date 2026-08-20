@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element -- MCP returns external image URLs at runtime. */
 
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Product = { id: string; seller_id?: string; title: string; description?: string; price: number | string; category: string; status?: string; created_at?: string; image?: string };
 type Profile = { id: string; first_name?: string; last_name?: string; created_at?: string };
@@ -111,7 +111,9 @@ export function MarketplaceApp() {
   const [agentOrders, setAgentOrders] = useState<Order[]>([]);
   const [agentSending, setAgentSending] = useState(false);
   const [agentError, setAgentError] = useState("");
+  const [agentButtonPosition, setAgentButtonPosition] = useState<{ x: number; y: number } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const agentDrag = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number; moved: boolean } | null>(null);
 
   const showToast = useCallback((text: string) => {
     setToast(text); if (toastTimer.current) clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(""), 3500);
@@ -173,6 +175,17 @@ export function MarketplaceApp() {
     const timer = setTimeout(() => void loadNotifications(), 600);
     return () => clearTimeout(timer);
   }, [loadNotifications]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const stored = localStorage.getItem("ryadom:agent-button-position");
+      if (!stored) return;
+      const position = JSON.parse(stored) as { x?: number; y?: number };
+      if (typeof position.x === "number" && typeof position.y === "number" && Number.isFinite(position.x) && Number.isFinite(position.y)) timer = setTimeout(() => setAgentButtonPosition({ x: Math.max(8, Math.min(window.innerWidth - 82, position.x as number)), y: Math.max(72, Math.min(window.innerHeight - 82, position.y as number)) }), 0);
+    } catch { /* Оставляем кнопку в позиции по умолчанию. */ }
+    return () => { if (timer) clearTimeout(timer); };
+  }, []);
 
   function saveReadMessages(ids: string[]) {
     const unique = [...new Set(ids)].slice(-500);
@@ -280,6 +293,31 @@ export function MarketplaceApp() {
     finally { setActing(false); }
   }
 
+  function beginAgentDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    agentDrag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, originX: rect.left, originY: rect.top, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveAgentButton(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = agentDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - drag.startX; const deltaY = event.clientY - drag.startY;
+    if (Math.hypot(deltaX, deltaY) > 4) drag.moved = true;
+    if (!drag.moved) return;
+    setAgentButtonPosition({ x: Math.max(8, Math.min(window.innerWidth - 82, drag.originX + deltaX)), y: Math.max(72, Math.min(window.innerHeight - 82, drag.originY + deltaY)) });
+  }
+
+  function finishAgentDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = agentDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    agentDrag.current = null;
+    if (drag.moved) {
+      setAgentButtonPosition((position) => { if (position) localStorage.setItem("ryadom:agent-button-position", JSON.stringify(position)); return position; });
+    } else { setPanel("agent"); setAgentError(""); }
+  }
+
   async function createOrUpdateProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); setActing(true); setActionError("");
     try {
@@ -322,7 +360,6 @@ export function MarketplaceApp() {
       <nav className="top-nav" aria-label="Личный кабинет">
         <button onClick={() => void openMyProducts()} type="button"><span className="nav-icon">□</span>Мои продукты</button>
         <button onClick={() => void openOrders()} type="button"><span className="nav-icon">⌁</span>Мои заказы</button>
-        <button className="agent-nav-button" onClick={() => { setPanel("agent"); setAgentError(""); }} type="button"><span className="nav-icon">✦</span>Агент</button>
         <div className="notification-wrap">
           <button className={`notification-button ${unreadMessages.length ? "has-unread" : ""}`} aria-expanded={notificationOpen} aria-label={unreadMessages.length ? `Новые сообщения: ${unreadMessages.length}` : "Новых сообщений нет"} onClick={() => { const next = !notificationOpen; setNotificationOpen(next); if (next) void loadNotifications(); }} type="button">
             <span className="bell-glyph" aria-hidden="true" />
@@ -381,6 +418,7 @@ export function MarketplaceApp() {
     {panel === "orders" && <Modal eyebrow="Покупки и продажи" title="Мои заказы" wide close={() => setPanel(null)}><div className="panel-tabs">{[["all","Все"],["buyer","Покупаю"],["seller","Продаю"]].map(([value,label]) => <button className={orderRole === value ? "active" : ""} key={value} onClick={() => { setOrderRole(value); void openOrders(value); }} type="button">{label}</button>)}</div>{actionError && <p className="inline-error">{actionError}</p>}{panelLoading ? <div className="panel-loader">Загружаем заказы…</div> : orders.length === 0 ? <EmptyState title="Заказов пока нет" text="Откройте понравившееся объявление и создайте заказ." /> : <div className="order-list">{orders.map((order) => <article key={order.id}><div><span className={`status-badge status-${order.status.toLowerCase()}`}>{statusNames[order.status] || order.status}</span><h3>{order.product?.title || `Заказ ${order.id.slice(0, 8)}`}</h3><p>{shortDate(order.created_at)}</p></div><div className="item-actions">{order.status === "CREATED" && order.seller_id === profile?.id && <button disabled={acting} onClick={() => void changeOrder(order,"accept_order")} type="button">Подтвердить</button>}{order.status === "ACCEPTED" && <button disabled={acting} onClick={() => void changeOrder(order,"complete_order")} type="button">Завершить</button>}{["CREATED","ACCEPTED"].includes(order.status) && <button className="danger-action" disabled={acting} onClick={() => void changeOrder(order,"cancel_order")} type="button">Отменить</button>}<button onClick={() => void openMessages({ productId: order.product_id || order.product?.id || "", productTitle: order.product?.title, orderId: order.id })} type="button">Сообщения</button></div></article>)}</div>}</Modal>}
 
     {panel === "messages" && <Modal eyebrow="Личные сообщения" title={messageContext.productTitle || "Сообщения"} wide close={() => setPanel(null)}><div className="conversation-setup"><label>ID продукта<input value={messageContext.productId} placeholder="Выберите товар или вставьте ID" onChange={(event) => setMessageContext({ ...messageContext, productId: event.target.value })} /></label><button disabled={!messageContext.productId || panelLoading} onClick={() => void openMessages()} type="button">Открыть диалог</button></div>{actionError && <p className="inline-error">{actionError}</p>}{panelLoading ? <div className="panel-loader">Загружаем переписку…</div> : !messageContext.productId ? <EmptyState title="Выберите объявление" text="Откройте карточку товара и нажмите «Написать продавцу» — или укажите ID продукта." /> : <><div className="message-list">{messages.length === 0 ? <EmptyState title="Диалог пока пуст" text="Начните разговор — уточните состояние или договоритесь о передаче." /> : messages.map((message) => <article className={message.sender_id === profile?.id ? "message mine" : "message"} key={message.id}><p>{message.text}</p><small>{shortDate(message.created_at)}</small></article>)}</div><form className="message-form" onSubmit={sendMessage}><textarea name="text" required maxLength={4000} placeholder="Напишите сообщение…" /><button disabled={acting} type="submit">{acting ? "…" : "Отправить ↗"}</button></form></>}</Modal>}
+    <button className="floating-agent-button" style={agentButtonPosition ? { "--agent-x": `${agentButtonPosition.x}px`, "--agent-y": `${agentButtonPosition.y}px` } as CSSProperties : undefined} type="button" aria-label="Открыть агента. Кнопку можно перетащить" title="Агент — перетащите в удобное место" onPointerDown={beginAgentDrag} onPointerMove={moveAgentButton} onPointerUp={finishAgentDrag} onPointerCancel={() => { agentDrag.current = null; }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setPanel("agent"); setAgentError(""); } }}><span aria-hidden="true">✦</span><small>Агент</small></button>
     {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
   </main>;
 }
