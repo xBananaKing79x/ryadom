@@ -20,7 +20,7 @@ test("server-renders the marketplace shell", async () => {
   const html = await response.text();
   assert.match(html, /<title>Рядом — всё нужное поблизости<\/title>/i);
   assert.match(html, /Найдётся/);
-  assert.match(html, /Что хотите найти/);
+  assert.match(html, /Что ищем сегодня/);
   assert.match(html, /Мои продукты/);
   assert.doesNotMatch(html, /MCP_API_TOKEN|c2c_6_/i);
 });
