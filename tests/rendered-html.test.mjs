@@ -37,6 +37,9 @@ test("keeps MCP writes server-side and explicitly allowlisted", async () => {
   assert.doesNotMatch(app, /MCP_API_TOKEN|Authorization:\s*["'`]Bearer/i);
   assert.match(app, /"create_order"/);
   assert.match(app, /"send_message"/);
+  assert.match(app, /notification-button/);
+  assert.match(app, /Отметить все прочитанными/);
+  assert.match(app, /ryadom:read-messages/);
   assert.ok(image.byteLength > 100_000);
   assert.ok(templateRoot.pathname.endsWith("/new-chat/"));
 });

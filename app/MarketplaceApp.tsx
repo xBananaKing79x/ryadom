@@ -6,7 +6,8 @@ import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState
 type Product = { id: string; seller_id?: string; title: string; description?: string; price: number | string; category: string; status?: string; created_at?: string; image?: string };
 type Profile = { id: string; first_name?: string; last_name?: string; created_at?: string };
 type Order = { id: string; product_id?: string; product?: Product; buyer_id?: string; seller_id?: string; status: string; created_at?: string };
-type Message = { id: string; sender_id?: string; receiver_id?: string; text: string; created_at?: string; product_id?: string };
+type Message = { id: string; sender_id?: string; receiver_id?: string; text: string; created_at?: string; product_id?: string; order_id?: string };
+type InboxMessage = Message & { product_id: string; productTitle: string };
 type ImageRecord = { id?: string; url?: string; alt_text?: string };
 type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown };
 type Panel = "profile" | "products" | "orders" | "messages" | "product" | "create" | "edit" | null;
@@ -83,6 +84,10 @@ export function MarketplaceApp() {
   const [orderRole, setOrderRole] = useState("all");
   const [selected, setSelected] = useState<Product | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [inboxMessages, setInboxMessages] = useState<InboxMessage[]>([]);
+  const [readMessageIds, setReadMessageIds] = useState<string[]>([]);
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const [notificationLoading, setNotificationLoading] = useState(false);
   const [messageContext, setMessageContext] = useState<{ productId: string; productTitle?: string; receiverId?: string; orderId?: string }>({ productId: "" });
   const [toast, setToast] = useState("");
   const [actionError, setActionError] = useState("");
@@ -116,10 +121,55 @@ export function MarketplaceApp() {
     finally { setLoading(false); }
   }, [category, hydrateImages, maxPrice, minPrice, query, sort]);
 
+  const loadNotifications = useCallback(async () => {
+    setNotificationLoading(true);
+    try {
+      const currentProfile = await mcpCall<Profile>("get_my_profile");
+      const ownProducts = await mcpCall<Product[]>("get_my_products", { limit: 20 });
+      setProfile(currentProfile);
+      const batches = await Promise.all((Array.isArray(ownProducts) ? ownProducts : []).map(async (product) => {
+        try {
+          const list = await mcpCall<Message[]>("get_messages", { product_id: product.id, limit: 20 });
+          return (Array.isArray(list) ? list : [])
+            .filter((message) => message.sender_id !== currentProfile.id)
+            .map((message) => ({ ...message, product_id: product.id, productTitle: product.title }));
+        } catch { return [] as InboxMessage[]; }
+      }));
+      const nextMessages = batches.flat().sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || "")));
+      setInboxMessages(nextMessages);
+      try {
+        const stored = localStorage.getItem(`ryadom:read-messages:${currentProfile.id}`);
+        setReadMessageIds(stored ? JSON.parse(stored) as string[] : []);
+      } catch { setReadMessageIds([]); }
+    } catch { /* Колокольчик остаётся доступным даже при временном сбое MCP. */ }
+    finally { setNotificationLoading(false); }
+  }, []);
+
   useEffect(() => {
     const timer = setTimeout(() => void loadProducts("", "", "created_desc"), 0);
     return () => clearTimeout(timer);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const timer = setTimeout(() => void loadNotifications(), 600);
+    return () => clearTimeout(timer);
+  }, [loadNotifications]);
+
+  function saveReadMessages(ids: string[]) {
+    const unique = [...new Set(ids)].slice(-500);
+    setReadMessageIds(unique);
+    if (profile?.id) localStorage.setItem(`ryadom:read-messages:${profile.id}`, JSON.stringify(unique));
+  }
+
+  function markAllMessagesRead() {
+    saveReadMessages([...readMessageIds, ...inboxMessages.map((message) => message.id)]);
+  }
+
+  function openInboxMessage(message: InboxMessage) {
+    saveReadMessages([...readMessageIds, message.id]);
+    setNotificationOpen(false);
+    void openMessages({ productId: message.product_id, productTitle: message.productTitle, receiverId: message.sender_id, orderId: message.order_id });
+  }
 
   async function openProfile() {
     setPanel("profile"); setPanelLoading(true);
@@ -191,6 +241,7 @@ export function MarketplaceApp() {
   }
 
   const profileName = useMemo(() => [profile?.first_name, profile?.last_name].filter(Boolean).join(" ") || "Пользователь", [profile]);
+  const unreadMessages = useMemo(() => inboxMessages.filter((message) => !readMessageIds.includes(message.id)), [inboxMessages, readMessageIds]);
   function chooseCategory(value: string) { setCategory(value); void loadProducts(query, value, sort); }
 
   return <main id="top">
@@ -199,7 +250,17 @@ export function MarketplaceApp() {
       <nav className="top-nav" aria-label="Личный кабинет">
         <button onClick={() => void openMyProducts()} type="button"><span className="nav-icon">□</span>Мои продукты</button>
         <button onClick={() => void openOrders()} type="button"><span className="nav-icon">⌁</span>Мои заказы</button>
-        <button onClick={() => void openMessages()} type="button"><span className="nav-icon">○</span>Сообщения</button>
+        <div className="notification-wrap">
+          <button className={`notification-button ${unreadMessages.length ? "has-unread" : ""}`} aria-expanded={notificationOpen} aria-label={unreadMessages.length ? `Новые сообщения: ${unreadMessages.length}` : "Новых сообщений нет"} onClick={() => { const next = !notificationOpen; setNotificationOpen(next); if (next) void loadNotifications(); }} type="button">
+            <span className="bell-glyph" aria-hidden="true" />
+            {unreadMessages.length > 0 && <span className="notification-count">{unreadMessages.length > 99 ? "99+" : unreadMessages.length}</span>}
+          </button>
+          {notificationOpen && <section className="notification-dropdown" aria-label="Новые сообщения">
+            <div className="notification-head"><div><strong>Сообщения</strong><span>{unreadMessages.length ? `${unreadMessages.length} непрочитанных` : "Новых сообщений нет"}</span></div><button aria-label="Обновить сообщения" disabled={notificationLoading} onClick={() => void loadNotifications()} type="button">↻</button></div>
+            <div className="notification-list">{notificationLoading && inboxMessages.length === 0 ? <p className="notification-empty">Проверяем сообщения…</p> : inboxMessages.length === 0 ? <p className="notification-empty">Когда вам напишут по товару, сообщение появится здесь.</p> : inboxMessages.slice(0, 8).map((message) => <button className={!readMessageIds.includes(message.id) ? "notification-item unread" : "notification-item"} key={message.id} onClick={() => openInboxMessage(message)} type="button"><span className="notification-avatar">{message.productTitle.charAt(0)}</span><span className="notification-copy"><strong>{message.productTitle}</strong><span>{message.text}</span><small>{shortDate(message.created_at)}</small></span>{!readMessageIds.includes(message.id) && <i aria-label="Непрочитанное сообщение" />}</button>)}</div>
+            <div className="notification-footer"><button disabled={unreadMessages.length === 0} onClick={markAllMessagesRead} type="button">✓ Отметить все прочитанными</button></div>
+          </section>}
+        </div>
         <button className="profile-button" onClick={() => void openProfile()} type="button"><span aria-hidden="true">●</span> Профиль</button>
       </nav>
     </header>
