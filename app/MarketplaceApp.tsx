@@ -266,7 +266,7 @@ export function MarketplaceApp() {
     </header>
 
     <section className="hero">
-      <div className="hero-copy"><p className="eyebrow">Маркетплейс хороших находок</p><h1>Всё нужное — <em>рядом</em></h1><p className="hero-description">Покупайте у людей поблизости и находите новые дома для вещей, которыми готовы поделиться.</p></div>
+      <div className="hero-copy"><p className="eyebrow">Вещи с историей — людям рядом</p><h1>Найдётся <em>рядом</em></h1><p className="hero-description">Хорошие вещи не должны лежать без дела. Покупайте, продавайте и договаривайтесь напрямую.</p></div>
       <div className="hero-art" aria-label="Подборка вещей с площадки"><div className="hero-art-image" /><span className="art-sticker">бережно<br />из рук в руки</span><span className="art-spark">✦</span></div>
     </section>
 
@@ -280,7 +280,7 @@ export function MarketplaceApp() {
     </section>
 
     <section className="catalog" aria-labelledby="catalog-title">
-      <div className="section-heading"><div><p className="eyebrow">Свежие объявления</p><h2 id="catalog-title">Можно забрать рядом</h2></div>{!loading && !error && <span>{products.length} предложений</span>}</div>
+      <div className="section-heading"><div><p className="eyebrow">Свежие находки</p><h2 id="catalog-title">Новое рядом с вами</h2></div>{!loading && !error && <span>{products.length} предложений</span>}</div>
       {error ? <div className="notice error"><strong>Каталог не загрузился</strong><span>{error}</span><button type="button" onClick={() => void loadProducts()}>Повторить</button></div> : loading ? <div className="product-grid" aria-label="Загрузка">{Array.from({ length: 8 }).map((_, index) => <div className="product-card skeleton" key={index} />)}</div> : products.length === 0 ? <div className="notice"><strong>Ничего не нашли</strong><span>Попробуйте изменить запрос или категорию.</span></div> : <div className="product-grid">{products.map((product) => <article className="product-card" key={product.id}><button className={`product-image category-${product.category}`} onClick={() => { setSelected(product); setPanel("product"); }} type="button">{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Находка"}</span>}<i aria-hidden="true">♡</i></button><div className="product-info"><span className="product-category">{categoryNames[product.category] || product.category}</span><h3>{product.title}</h3><strong>{money(product.price)}</strong><div className="card-actions"><button className="card-link" onClick={() => { setSelected(product); setPanel("product"); }} type="button">Посмотреть <span aria-hidden="true">↗</span></button><button className="message-link" aria-label={`Написать по объявлению «${product.title}»`} onClick={() => void openMessages({ productId: product.id, productTitle: product.title })} type="button"><span aria-hidden="true">○</span> Написать</button></div></div></article>)}</div>}
     </section>
 

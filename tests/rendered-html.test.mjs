@@ -19,7 +19,7 @@ test("server-renders the marketplace shell", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /<title>Рядом — всё нужное поблизости<\/title>/i);
-  assert.match(html, /Всё нужное/);
+  assert.match(html, /Найдётся/);
   assert.match(html, /Что хотите найти/);
   assert.match(html, /Мои продукты/);
   assert.doesNotMatch(html, /MCP_API_TOKEN|c2c_6_/i);
