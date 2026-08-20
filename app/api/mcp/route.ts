@@ -21,6 +21,9 @@ function publicError(reason: unknown) {
   if (/401|unauthorized|auth|api key/i.test(sanitized)) {
     return "MCP-сервер отклонил ключ доступа. Проверьте личный токен.";
   }
+  if (/502|POSTing to endpoint|Streamable HTTP|fetch failed|ECONN/i.test(sanitized)) {
+    return "Сервис каталога временно недоступен. Попробуйте ещё раз через минуту.";
+  }
   return sanitized;
 }
 
