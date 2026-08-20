@@ -52,3 +52,18 @@ test("uses the image MIME type required by the marketplace", async () => {
   assert.match(source, /5 \* 1024 \* 1024/);
   assert.doesNotMatch(source, /file\.type\.replace\("image\/"/);
 });
+
+test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
+  const [agentRoute, app] = await Promise.all([
+    readFile(new URL("../app/api/agent/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/MarketplaceApp.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(agentRoute, /process\.env\.DEEPSEEK_API_KEY/);
+  assert.match(agentRoute, /deepseek-v4-flash/);
+  assert.match(agentRoute, /search_products/);
+  assert.match(agentRoute, /get_my_orders/);
+  assert.doesNotMatch(app, /DEEPSEEK_API_KEY|api\.deepseek\.com/);
+  assert.match(app, /Агент по покупкам/);
+  assert.match(app, /createAgentOrder/);
+  assert.match(app, /acceptAgentOrder/);
+});

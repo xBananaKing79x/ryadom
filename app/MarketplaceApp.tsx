@@ -10,7 +10,8 @@ type Message = { id: string; sender_id?: string; receiver_id?: string; text: str
 type InboxMessage = Message & { product_id: string; productTitle: string };
 type ImageRecord = { id?: string; url?: string; alt_text?: string };
 type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown; isError?: boolean };
-type Panel = "profile" | "products" | "orders" | "messages" | "product" | "create" | "edit" | null;
+type AgentMessage = { role: "user" | "assistant"; content: string };
+type Panel = "profile" | "products" | "orders" | "messages" | "agent" | "product" | "create" | "edit" | null;
 
 const categories = [
   ["", "Все", "✦"], ["electronics", "Электроника", "⌁"], ["computers", "Компьютеры", "⌘"],
@@ -19,6 +20,7 @@ const categories = [
 ] as const;
 const categoryNames = Object.fromEntries(categories.map(([value, label]) => [value, label]));
 const statusNames: Record<string, string> = { ACTIVE: "Активно", RESERVED: "Зарезервировано", SOLD: "Продано", REMOVED: "Снято", CREATED: "Создан", ACCEPTED: "Подтверждён", CANCELLED: "Отменён", COMPLETED: "Завершён" };
+const agentGreeting: AgentMessage = { role: "assistant", content: "Помогу найти товар или разобраться с заказами. Опишите задачу — я уточню категорию, бюджет и другие важные параметры." };
 
 function unwrap<T>(result?: McpResult): T {
   const value = result?.structuredContent as Record<string, unknown> | undefined;
@@ -104,6 +106,11 @@ export function MarketplaceApp() {
   const [toast, setToast] = useState("");
   const [actionError, setActionError] = useState("");
   const [acting, setActing] = useState(false);
+  const [agentMessages, setAgentMessages] = useState<AgentMessage[]>([agentGreeting]);
+  const [agentProducts, setAgentProducts] = useState<Product[]>([]);
+  const [agentOrders, setAgentOrders] = useState<Order[]>([]);
+  const [agentSending, setAgentSending] = useState(false);
+  const [agentError, setAgentError] = useState("");
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((text: string) => {
@@ -222,6 +229,57 @@ export function MarketplaceApp() {
     } catch (reason) { setActionError(reason instanceof Error ? reason.message : "Сообщение не отправлено"); } finally { setActing(false); }
   }
 
+  async function runAgentTask(text: string) {
+    const cleanText = text.trim();
+    if (!cleanText || agentSending) return;
+    const nextHistory = [...agentMessages, { role: "user" as const, content: cleanText }].slice(-18);
+    setAgentMessages(nextHistory); setAgentSending(true); setAgentError("");
+    try {
+      const response = await fetch("/api/agent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messages: nextHistory }) });
+      const responseText = await response.text();
+      let payload: { message?: string; products?: Product[]; orders?: Order[]; error?: string };
+      try { payload = JSON.parse(responseText) as typeof payload; }
+      catch { throw new Error("Агент вернул некорректный ответ"); }
+      if (!response.ok) throw new Error(payload.error || "Агент временно недоступен");
+      setAgentMessages((current) => [...current, { role: "assistant", content: payload.message || "Готово." }].slice(-18));
+      if (Array.isArray(payload.products) && payload.products.length) { setAgentProducts(payload.products); setAgentOrders([]); }
+      if (Array.isArray(payload.orders) && payload.orders.length) { setAgentOrders(payload.orders); setAgentProducts([]); }
+    } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось выполнить задачу"); }
+    finally { setAgentSending(false); }
+  }
+
+  async function submitAgentTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const text = String(form.get("agent_task") || "");
+    formElement.reset();
+    await runAgentTask(text);
+  }
+
+  async function createAgentOrder(product: Product) {
+    if (!window.confirm(`Создать заказ на «${product.title}» за ${money(product.price)}?`)) return;
+    setActing(true); setAgentError("");
+    try {
+      await mcpCall("create_order", { product_id: product.id });
+      setAgentMessages((current) => [...current, { role: "assistant", content: `Заказ на «${product.title}» создан. Теперь продавец может его подтвердить.` }].slice(-18));
+      showToast("Заказ создан");
+    } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось создать заказ"); }
+    finally { setActing(false); }
+  }
+
+  async function acceptAgentOrder(order: Order) {
+    if (!window.confirm("Подтвердить этот заказ? Товар перейдёт в статус «На холде», остальные заявки будут отменены.")) return;
+    setActing(true); setAgentError("");
+    try {
+      await mcpCall("accept_order", { order_id: order.id });
+      setAgentOrders((current) => current.map((item) => item.id === order.id ? { ...item, status: "ACCEPTED" } : item.product_id === order.product_id && item.status === "CREATED" ? { ...item, status: "CANCELLED" } : item));
+      setAgentMessages((current) => [...current, { role: "assistant", content: "Заказ подтверждён. Товар поставлен на холд, остальные активные заявки по нему отменены платформой." }].slice(-18));
+      showToast("Заказ подтверждён — товар на холде");
+    } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось подтвердить заказ"); }
+    finally { setActing(false); }
+  }
+
   async function createOrUpdateProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); setActing(true); setActionError("");
     try {
@@ -254,6 +312,8 @@ export function MarketplaceApp() {
 
   const profileName = useMemo(() => [profile?.first_name, profile?.last_name].filter(Boolean).join(" ") || "Пользователь", [profile]);
   const unreadMessages = useMemo(() => inboxMessages.filter((message) => !readMessageIds.includes(message.id)), [inboxMessages, readMessageIds]);
+  const agentSortedOrders = useMemo(() => [...agentOrders].sort((left, right) => Number(right.product?.price || 0) - Number(left.product?.price || 0)), [agentOrders]);
+  const bestAgentOrderId = agentSortedOrders.find((order) => order.status === "CREATED")?.id;
   function chooseCategory(value: string) { setCategory(value); void loadProducts(query, value, sort); }
 
   return <main id="top">
@@ -262,6 +322,7 @@ export function MarketplaceApp() {
       <nav className="top-nav" aria-label="Личный кабинет">
         <button onClick={() => void openMyProducts()} type="button"><span className="nav-icon">□</span>Мои продукты</button>
         <button onClick={() => void openOrders()} type="button"><span className="nav-icon">⌁</span>Мои заказы</button>
+        <button className="agent-nav-button" onClick={() => { setPanel("agent"); setAgentError(""); }} type="button"><span className="nav-icon">✦</span>Агент</button>
         <div className="notification-wrap">
           <button className={`notification-button ${unreadMessages.length ? "has-unread" : ""}`} aria-expanded={notificationOpen} aria-label={unreadMessages.length ? `Новые сообщения: ${unreadMessages.length}` : "Новых сообщений нет"} onClick={() => { const next = !notificationOpen; setNotificationOpen(next); if (next) void loadNotifications(); }} type="button">
             <span className="bell-glyph" aria-hidden="true" />
@@ -304,6 +365,16 @@ export function MarketplaceApp() {
     {panel === "products" && <Modal eyebrow="Ваши объявления" title="Мои продукты" wide close={() => setPanel(null)}><div className="panel-actions"><button className="primary-action" onClick={() => { setSelected(null); setPanel("create"); }} type="button">＋ Добавить продукт</button></div>{actionError && <p className="inline-error">{actionError}</p>}{panelLoading ? <div className="panel-loader">Загружаем продукты…</div> : myProducts.length === 0 ? <EmptyState title="Пока нет объявлений" text="Первое объявление можно разместить за пару минут." action={<button className="text-action" onClick={() => setPanel("create")} type="button">Добавить продукт →</button>} /> : <div className="compact-list">{myProducts.map((product) => <article key={product.id}><div className={`compact-image category-${product.category}`}>{product.image ? <img src={product.image} alt="" /> : categoryNames[product.category]}</div><div><span className={`status-badge status-${product.status?.toLowerCase()}`}>{statusNames[product.status || ""] || product.status}</span><h3>{product.title}</h3><strong>{money(product.price)}</strong></div><div className="item-actions"><button onClick={() => { setSelected(product); setPanel("edit"); }} type="button">Редактировать</button><button className="danger-action" disabled={acting} onClick={() => void removeProduct(product)} type="button">Снять</button></div></article>)}</div>}</Modal>}
 
     {(panel === "create" || panel === "edit") && <Modal eyebrow={panel === "edit" ? "Редактирование" : "Новое объявление"} title={panel === "edit" ? "Обновить продукт" : "Добавить продукт"} close={() => setPanel(null)}><form className="product-form" onSubmit={createOrUpdateProduct}><label>Название<input name="title" minLength={3} maxLength={200} required defaultValue={panel === "edit" ? selected?.title : ""} placeholder="Например, торшер из дерева" /></label><label>Описание<textarea name="description" minLength={1} maxLength={5000} required defaultValue={panel === "edit" ? selected?.description : ""} placeholder="Состояние, комплект, детали передачи" /></label><div className="form-grid"><label>Цена, ₽<input name="price" type="number" min="0.01" step="0.01" required defaultValue={panel === "edit" ? String(selected?.price || "") : ""} placeholder="2500" /></label><label>Категория<select name="category" required defaultValue={panel === "edit" ? selected?.category : "home"}>{categories.slice(1).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div><label className="file-field">Фотография<input name="image" type="file" accept="image/jpeg,image/png,image/webp" /><span>{panel === "edit" ? "Выберите новое фото, чтобы добавить его" : "JPEG, PNG или WebP"}</span></label>{actionError && <p className="inline-error">{actionError}</p>}<button className="submit-action" disabled={acting} type="submit">{acting ? "Сохраняем…" : panel === "edit" ? "Сохранить изменения" : "Опубликовать продукт"}</button></form></Modal>}
+
+    {panel === "agent" && <Modal eyebrow="DeepSeek × MCP" title="Агент по покупкам" wide close={() => setPanel(null)}><div className="agent-shell">
+      <aside className="agent-aside"><div className="agent-orb" aria-hidden="true">✦</div><strong>Что поручить?</strong><p>Агент уточнит запрос, найдёт реальные объявления и подготовит безопасное действие.</p><div className="agent-prompts"><button onClick={() => void runAgentTask("Хочу найти товар. Спроси у меня категорию, бюджет и важные параметры.")} type="button">Найти товар</button><button onClick={() => void runAgentTask("Найди товары в статусе RESERVED — на холде. Сначала уточни, что именно искать.")} type="button">Поиск на холде</button><button onClick={() => void runAgentTask("Покажи мои входящие заказы со статусом CREATED и помоги выбрать лучший доступный.")} type="button">Разобрать заказы</button></div><small>Действия выполняются только после вашего подтверждения.</small></aside>
+      <section className="agent-workspace"><div className="agent-chat" aria-live="polite">{agentMessages.map((message, index) => <article className={`agent-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "assistant" ? "Р" : "Вы"}</span><p>{message.content}</p></article>)}{agentSending && <article className="agent-message assistant thinking"><span>Р</span><p>Ищу и сравниваю…</p></article>}</div>
+        {agentError && <p className="inline-error">{agentError}</p>}
+        {agentProducts.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Найденные предложения</strong><span>{agentProducts.length}</span></div><div className="agent-product-strip">{agentProducts.map((product) => <article className="agent-product-card" key={product.id}><button className={`agent-product-image category-${product.category}`} onClick={() => { setSelected(product); setPanel("product"); }} type="button">{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Товар"}</span>}<i>{statusNames[product.status || "ACTIVE"] || product.status}</i></button><div><small>{categoryNames[product.category] || product.category}</small><h3>{product.title}</h3><strong>{money(product.price)}</strong><div className="agent-card-actions"><button onClick={() => { setSelected(product); setPanel("product"); }} type="button">Карточка</button>{product.status === "ACTIVE" && <button disabled={acting} onClick={() => void createAgentOrder(product)} type="button">Создать заказ</button>}</div></div></article>)}</div></div>}
+        {agentSortedOrders.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Входящие заказы</strong><span>{agentSortedOrders.length}</span></div><div className="agent-order-list">{agentSortedOrders.map((order) => <article className={order.id === bestAgentOrderId ? "agent-order recommended" : "agent-order"} key={order.id}><div>{order.id === bestAgentOrderId && <span className="agent-recommendation">Рекомендация агента</span>}<strong>{order.product?.title || `Заказ ${order.id.slice(0, 8)}`}</strong><small>{statusNames[order.status] || order.status} · {shortDate(order.created_at)}</small></div><div><strong>{order.product ? money(order.product.price) : "Цена объявления"}</strong>{order.status === "CREATED" && <button disabled={acting} onClick={() => void acceptAgentOrder(order)} type="button">Подтвердить</button>}</div></article>)}</div><p className="agent-order-note">MCP не хранит отдельную цену предложения: сравнение выполняется по цене объявления. При равенстве агент не обещает несуществующую выгоду.</p></div>}
+        <form className="agent-composer" onSubmit={submitAgentTask}><textarea aria-label="Задача агенту" disabled={agentSending} name="agent_task" required maxLength={4000} placeholder="Например: найди городской велосипед до 35 000 ₽…" /><button disabled={agentSending} type="submit">{agentSending ? "Думаю…" : "Отправить ↗"}</button></form>
+      </section>
+    </div></Modal>}
 
     {panel === "product" && selected && <Modal eyebrow={categoryNames[selected.category] || "Объявление"} title={selected.title} wide close={() => setPanel(null)}><div className="product-detail"><div className={`detail-image category-${selected.category}`}>{selected.image ? <img src={selected.image} alt={selected.title} /> : <span>{categoryNames[selected.category] || "Находка"}</span>}</div><div className="detail-copy"><span className="status-badge status-active">{statusNames[selected.status || "ACTIVE"]}</span><strong className="detail-price">{money(selected.price)}</strong><p>{selected.description || "Продавец пока не добавил описание."}</p><small>Объявление · {selected.id.slice(0, 8)}</small>{actionError && <p className="inline-error">{actionError}</p>}<div className="detail-actions"><button className="submit-action" disabled={acting} onClick={() => void createOrder(selected)} type="button">Создать заказ</button><button className="secondary-action" onClick={() => void openMessages({ productId: selected.id, productTitle: selected.title })} type="button">Написать продавцу</button></div></div></div></Modal>}
 
