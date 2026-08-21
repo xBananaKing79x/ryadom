@@ -149,6 +149,21 @@ const tools = [
   {
     type: "function",
     function: {
+      name: "reject_order",
+      description: "Отклонить входящий заказ продавца через MCP cancel_order. Перед отменой сообщает покупателю причину и после операции проверяет статус CANCELLED.",
+      parameters: {
+        type: "object",
+        properties: {
+          order_id: { type: "string", minLength: 1, description: "ID входящего заказа" },
+          reason: { type: "string", maxLength: 500, description: "Короткая причина отклонения для покупателя" },
+        },
+        required: ["order_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "inspect_completed_purchases",
       description: "Найти завершённые покупки текущего пользователя, которые можно повторно выставить с наценкой 15%.",
       parameters: { type: "object", properties: {} },
@@ -177,7 +192,7 @@ const systemPrompt = `Ты — автономный агент C2C-маркет�
 Если пользователь просит найти товар, сначала собери достаточные параметры: что ищем, категория, бюджет или диапазон цены, желаемый статус и предпочтительная сортировка. Категорию можно уверенно вывести из запроса, но бюджет при отсутствии уточни. Не вызывай поиск, пока запрос слишком общий. Если пользователь называет имя или фамилию продавца, используй search_products_by_seller_name; не пытайся искать имя продавца как название товара.
 ACTIVE — доступен для покупки, RESERVED — товар на холде, SOLD — продан, REMOVED — снят.
 После поиска кратко объясни выбор. Не выдумывай товары, цены, изображения, id и статусы.
-Пользователь делегировал тебе проведение сделок. Для покупки по выбранному товару используй start_purchase, а для продолжения торга, резерва и оплаты — process_purchase_orders. Для проверки и ведения продаж используй process_sales_inbox; inspect_sales_inbox оставь для просмотра без действий. Если просит перепродать купленные товары — inspect_completed_purchases.
+Пользователь делегировал тебе проведение сделок. Для покупки по выбранному товару используй start_purchase, а для продолжения торга, резерва и оплаты — process_purchase_orders. Для проверки и ведения продаж используй process_sales_inbox; inspect_sales_inbox оставь для просмотра без действий. Для явного отклонения конкретного входящего заказа используй reject_order и передай понятную причину покупателю. Если просит перепродать купленные товары — inspect_completed_purchases.
 Для публикации одного или нескольких полностью заполненных товаров используй create_products_batch. Если пользователь просит найти описание, цену и картинку в интернете, используй research_and_create_products. Перед публикацией уточни модель товара и состояние, если они не указаны. Не выдумывай результаты веб-поиска и не заявляй об успешной публикации без результата инструмента.
 Цена из сообщения остаётся неформальным предложением, потому что MCP не хранит цену торга в заказе. Покупатель начинает торг с 70% цены объявления. Для продажи автоматически допустима цена не ниже 90% цены объявления; более высокая цена тоже допустима. Среди допустимых CREATED-заказов выбирай самый высокий. На цену ниже порога продавец сообщает минимальную допустимую цену и оставляет заказ открытым для продолжения торга.
 После accept_order агент продавца обязан повторно проверить: заказ стал ACCEPTED, товар стал RESERVED. Только затем он фиксирует spot-курс ETH/RUB, пересчитывает цену объявления в ETH, сообщает расчёт и публичный кошелёк Ethereum Sepolia. Агент покупателя считает подтверждением продавца только свежие статусы ACCEPTED и RESERVED, отвечает на каждый новый комментарий продавца и просит снять товар с открытой продажи через RESERVED. Перед каждым переводом он проверяет уже отправленные по этому заказу хэши и баланс кошелька; общая сумма всех отправленных транзакций не может превышать зафиксированную цену. Агент продолжает каждый незавершённый диалог при новых сообщениях и на каждой автопроверке. Терминальные состояния: CANCELLED, SOLD или подтверждённое поступление полной суммы на правильный кошелёк. При отказе стороны вызывай cancel_order. Продажа завершается только когда правильный адрес получил и финализировал всю сумму ETH, а её эквивалент по зафиксированному ETH/RUB не ниже цены объявления в рублях. Затем агент продавца вызывает complete_order и проверяет COMPLETED или SOLD. До этого не заявляй, что товар продан.
@@ -773,11 +788,43 @@ async function callAgentTool(name: string, args: Record<string, unknown>) {
   if (name === "process_sales_inbox") return processSalesInbox();
   if (name === "start_purchase") return startPurchase(args);
   if (name === "process_purchase_orders") return processPurchaseOrders();
+  if (name === "reject_order") return rejectOrder(args);
   if (name === "inspect_completed_purchases") return inspectCompletedPurchases();
   if (name === "get_test_payment_details") return getTestPaymentDetails();
   if (name === "verify_test_payment") return verifyTestPayment(args.transaction_hash);
   if (!allowedAgentTools.has(name)) throw new Error("Инструмент агенту недоступен");
   return withMcp((client) => callChecked<unknown>(client, name, args));
+}
+
+async function rejectOrder(args: Record<string, unknown>) {
+  const orderId = typeof args.order_id === "string" ? args.order_id.trim() : "";
+  const reason = typeof args.reason === "string" && args.reason.trim() ? args.reason.trim().slice(0, 500) : "Продавец не может выполнить этот заказ";
+  if (!orderId) throw new Error("Укажите ID заказа для отклонения");
+
+  return withMcp(async (client) => {
+    const profile = await callChecked<Profile>(client, "get_my_profile");
+    const order = await callChecked<Order>(client, "get_order", { order_id: orderId });
+    if (order.seller_id !== profile.id) throw new Error("Можно отклонять только входящие заказы, где вы продавец");
+    if (!["CREATED", "ACCEPTED"].includes(order.status)) throw new Error(`Заказ в статусе ${order.status} уже нельзя отклонить`);
+    const productId = order.product_id || order.product?.id;
+    const product = productId ? await callChecked<Product>(client, "get_product", { product_id: productId }) : order.product;
+    let messageSent = false;
+    if (productId && order.buyer_id) {
+      try {
+        await callChecked(client, "send_message", {
+          product_id: productId,
+          order_id: order.id,
+          receiver_id: order.buyer_id,
+          text: `Заказ на «${product?.title || "товар"}» отклонён продавцом. Причина: ${reason}.`,
+        });
+        messageSent = true;
+      } catch { /* Отмена заказа важнее необязательного уведомления. */ }
+    }
+    await callChecked(client, "cancel_order", { order_id: order.id });
+    const cancelledOrder = await callChecked<Order>(client, "get_order", { order_id: order.id });
+    if (cancelledOrder.status !== "CANCELLED") throw new Error("Платформа ещё не подтвердила отклонение заказа");
+    return { order: { ...cancelledOrder, product }, product, message_sent: messageSent, reason };
+  });
 }
 
 function normalizedName(value: string) {
@@ -896,6 +943,11 @@ export async function POST(request: Request) {
           if (call.function.name === "process_purchase_orders" && value && typeof value === "object") {
             const processed = value as { orders?: Order[] };
             foundOrders = Array.isArray(processed.orders) ? processed.orders : [];
+          }
+          if (call.function.name === "reject_order" && value && typeof value === "object") {
+            const rejected = value as { order?: Order; product?: Product };
+            foundOrders = rejected.order ? [rejected.order] : [];
+            foundProducts = rejected.product ? await hydrateProducts([rejected.product]) : [];
           }
           if (call.function.name === "inspect_completed_purchases" && value && typeof value === "object") {
             const inspected = value as { products?: Product[] };

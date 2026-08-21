@@ -100,6 +100,10 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(agentRoute, /process_sales_inbox/);
   assert.match(agentRoute, /start_purchase/);
   assert.match(agentRoute, /process_purchase_orders/);
+  assert.match(agentRoute, /name: "reject_order"/);
+  assert.match(agentRoute, /if \(name === "reject_order"\) return rejectOrder\(args\)/);
+  assert.match(agentRoute, /Можно отклонять только входящие заказы/);
+  assert.match(agentRoute, /cancelledOrder\.status !== "CANCELLED"/);
   assert.match(agentRoute, /automation === "deals"/);
   assert.match(agentRoute, /walletFromDescription/);
   assert.match(agentRoute, /acceptedOrder.status !== "ACCEPTED"/);
