@@ -10,6 +10,7 @@ type ToolCall = { id: string; type: "function"; function: { name: string; argume
 type DeepSeekMessage = { role: "system" | "user" | "assistant" | "tool"; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string };
 type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown; isError?: boolean };
 type Product = { id: string; title: string; description?: string; price: number | string; category: string; status?: string; seller_id?: string; image?: string };
+type Profile = { id: string; first_name?: string; last_name?: string };
 type Order = { id: string; product_id?: string; status: string; product?: Product; created_at?: string; buyer_id?: string; seller_id?: string };
 type Message = { id: string; product_id?: string; order_id?: string; sender_id?: string; receiver_id?: string; text: string; created_at?: string };
 type AgentOffer = { message: Message; product: Product; order?: Order; offered_price?: number };
@@ -35,6 +36,27 @@ const tools = [
           sort: { type: "string", enum: ["created_desc", "created_asc", "price_asc", "price_desc"] },
           limit: { type: "integer", minimum: 1, maximum: 12 },
         },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_products_by_seller_name",
+      description: "Найти объявления по имени, фамилии или полному имени продавца. Сопоставляет реальные профили продавцов с их объявлениями.",
+      parameters: {
+        type: "object",
+        properties: {
+          seller_name: { type: "string", minLength: 2, maxLength: 160, description: "Имя, фамилия или полное имя продавца" },
+          query: { type: "string", maxLength: 200, description: "Необязательный поиск по названию товара" },
+          category: { type: "string", enum: ["electronics", "computers", "phones", "gaming", "transport", "home", "clothes", "other"] },
+          min_price: { type: "number", minimum: 0 },
+          max_price: { type: "number", minimum: 0 },
+          status: { type: "string", enum: ["ACTIVE", "RESERVED", "SOLD", "REMOVED"] },
+          sort: { type: "string", enum: ["created_desc", "created_asc", "price_asc", "price_desc"] },
+          limit: { type: "integer", minimum: 1, maximum: 12 },
+        },
+        required: ["seller_name"],
       },
     },
   },
@@ -122,7 +144,7 @@ const tools = [
 
 const systemPrompt = `Ты — автономный агент C2C-маркетплейса «Рядом». Отвечай по-русски, коротко и дружелюбно.
 Твоя задача — искать товары и полностью вести разрешённые пользователем покупки и продажи через инструменты с реальными данными.
-Если пользователь просит найти товар, сначала собери достаточные параметры: что ищем, категория, бюджет или диапазон цены, желаемый статус и предпочтительная сортировка. Категорию можно уверенно вывести из запроса, но бюджет при отсутствии уточни. Не вызывай поиск, пока запрос слишком общий.
+Если пользователь просит найти товар, сначала собери достаточные параметры: что ищем, категория, бюджет или диапазон цены, желаемый статус и предпочтительная сортировка. Категорию можно уверенно вывести из запроса, но бюджет при отсутствии уточни. Не вызывай поиск, пока запрос слишком общий. Если пользователь называет имя или фамилию продавца, используй search_products_by_seller_name; не пытайся искать имя продавца как название товара.
 ACTIVE — доступен для покупки, RESERVED — товар на холде, SOLD — продан, REMOVED — снят.
 После поиска кратко объясни выбор. Не выдумывай товары, цены, изображения, id и статусы.
 Пользователь делегировал тебе проведение сделок. Для покупки по выбранному товару используй start_purchase, а для продолжения торга, резерва и оплаты — process_purchase_orders. Для проверки и ведения продаж используй process_sales_inbox; inspect_sales_inbox оставь для просмотра без действий. Если просит перепродать купленные товары — inspect_completed_purchases.
@@ -470,6 +492,7 @@ async function processPurchaseOrders() {
 }
 
 async function callAgentTool(name: string, args: Record<string, unknown>) {
+  if (name === "search_products_by_seller_name") return searchProductsBySellerName(args);
   if (name === "inspect_sales_inbox") return inspectSalesInbox();
   if (name === "process_sales_inbox") return processSalesInbox();
   if (name === "start_purchase") return startPurchase(args);
@@ -479,6 +502,32 @@ async function callAgentTool(name: string, args: Record<string, unknown>) {
   if (name === "verify_test_payment") return verifyTestPayment(args.transaction_hash);
   if (!allowedAgentTools.has(name)) throw new Error("Инструмент агенту недоступен");
   return withMcp((client) => callChecked<unknown>(client, name, args));
+}
+
+function normalizedName(value: string) {
+  return value.toLocaleLowerCase("ru-RU").replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+async function searchProductsBySellerName(args: Record<string, unknown>) {
+  const sellerName = typeof args.seller_name === "string" ? normalizedName(args.seller_name) : "";
+  if (sellerName.length < 2) throw new Error("Укажите имя или фамилию продавца");
+  const requestedLimit = typeof args.limit === "number" ? Math.min(12, Math.max(1, Math.trunc(args.limit))) : 12;
+  const searchArgs = Object.fromEntries(Object.entries(args).filter(([key]) => key !== "seller_name" && key !== "limit"));
+
+  return withMcp(async (client) => {
+    const products = await callChecked<Product[]>(client, "search_products", { ...searchArgs, limit: 100 });
+    const productList = Array.isArray(products) ? products : [];
+    const sellerIds = [...new Set(productList.map((product) => product.seller_id).filter((id): id is string => Boolean(id)))];
+    const profiles = await Promise.all(sellerIds.map(async (profileId) => {
+      try { return await callChecked<Profile>(client, "get_profile", { profile_id: profileId }); }
+      catch { return undefined; }
+    }));
+    const matchingSellerIds = new Set(profiles.filter((profile): profile is Profile => Boolean(profile)).filter((profile) => {
+      const profileName = normalizedName([profile.first_name, profile.last_name].filter(Boolean).join(" "));
+      return sellerName.split(" ").every((part) => profileName.includes(part));
+    }).map((profile) => profile.id));
+    return productList.filter((product) => product.seller_id && matchingSellerIds.has(product.seller_id)).slice(0, requestedLimit);
+  });
 }
 
 async function hydrateProducts(products: Product[]) {
@@ -542,7 +591,7 @@ export async function POST(request: Request) {
         catch { /* DeepSeek will receive the tool error and can recover. */ }
         try {
           const value = await callAgentTool(call.function.name, args);
-          if (call.function.name === "search_products" || call.function.name === "get_my_products") {
+          if (["search_products", "search_products_by_seller_name", "get_my_products"].includes(call.function.name)) {
             const list = Array.isArray(value) ? value as Product[] : [];
             foundProducts = await hydrateProducts(list);
           }

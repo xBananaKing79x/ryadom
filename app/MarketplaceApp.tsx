@@ -208,12 +208,12 @@ export function MarketplaceApp() {
           void loadNotifications();
           void loadProducts();
         }
-      } catch { /* Автопроверка повторится через минуту. */ }
+      } catch { /* Автопроверка повторится через пять секунд. */ }
       finally { running = false; }
     };
-    const firstTick = setTimeout(() => void tick(), 5000);
-    const interval = setInterval(() => void tick(), 60_000);
-    return () => { stopped = true; clearTimeout(firstTick); clearInterval(interval); };
+    void tick();
+    const interval = setInterval(() => void tick(), 5_000);
+    return () => { stopped = true; clearInterval(interval); };
   }, [loadNotifications, loadProducts, showToast]);
 
   useEffect(() => {

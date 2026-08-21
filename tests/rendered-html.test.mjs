@@ -66,6 +66,8 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(agentRoute, /process\.env\.DEEPSEEK_API_KEY/);
   assert.match(agentRoute, /deepseek-v4-flash/);
   assert.match(agentRoute, /search_products/);
+  assert.match(agentRoute, /search_products_by_seller_name/);
+  assert.match(agentRoute, /callChecked<Profile>\(client, "get_profile", \{ profile_id: profileId \}\)/);
   assert.match(agentRoute, /get_my_orders/);
   assert.match(agentRoute, /inspect_sales_inbox/);
   assert.match(agentRoute, /process_sales_inbox/);
@@ -104,6 +106,7 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /requestSubmit\(\)/);
   assert.match(app, /agentChatRef/);
   assert.match(app, /chat\.scrollHeight/);
+  assert.match(app, /setInterval\(\(\) => void tick\(\), 5_000\)/);
   assert.match(app, /Провести покупки/);
   assert.match(app, /createAgentOrder/);
   assert.match(app, /acceptAgentOrder/);
