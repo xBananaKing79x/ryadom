@@ -101,7 +101,12 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(sepolia, /amount_matches/);
   assert.match(sepolia, /quoteRubPriceInEth/);
   assert.match(sepolia, /api\.coinbase\.com\/v2\/prices\/ETH-RUB\/spot/);
-  assert.match(agentRoute, /paymentTotal\.total_finalized_matches/);
+  assert.match(agentRoute, /payment\.total_finalized_matches/);
+  assert.match(agentRoute, /settlementMatchesListing/);
+  assert.match(agentRoute, /finalizedRub \+ 0\.01 >= listedPrice/);
+  assert.match(agentRoute, /completedOrder\.status !== "COMPLETED" && completedProduct\.status !== "SOLD"/);
+  assert.match(agentRoute, /Ответ на сообщение покупателя/);
+  assert.match(agentRoute, /Продавец отказался от сделки/);
   assert.match(agentRoute, /sendTestPayment\(wallet, amountToSend\)/);
   assert.match(agentRoute, /create_products_batch/);
   assert.match(agentRoute, /research_and_create_products/);
