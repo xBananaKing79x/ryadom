@@ -112,6 +112,9 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.doesNotMatch(agentRoute, /get_messages", \{ product_id: productId, order_id: order\.id, limit: 100 \}/);
   assert.match(agentRoute, /const sales = await processSalesInbox\(\)/);
   assert.match(agentRoute, /const purchases = await processPurchaseOrders\(\)/);
+  assert.match(agentRoute, /RATE_LIMITED\|Too many MCP requests/);
+  assert.match(agentRoute, /waitForMcp\(1_100 \* \(attempt \+ 1\)\)/);
+  assert.match(agentRoute, /if \(connected \|\| !isRateLimited/);
   assert.match(agentRoute, /sendTestPayment\(wallet, amountToSend\)/);
   assert.match(agentRoute, /create_products_batch/);
   assert.match(agentRoute, /research_and_create_products/);

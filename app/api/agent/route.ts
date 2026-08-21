@@ -195,19 +195,45 @@ function unwrap<T>(result: McpResult): T {
   } catch { return text as T; }
 }
 
+function isRateLimited(reason: unknown) {
+  return /RATE_LIMITED|Too many MCP requests|\b429\b/i.test(reason instanceof Error ? reason.message : String(reason));
+}
+
+function waitForMcp(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 async function withMcp<T>(operation: (client: Client) => Promise<T>) {
   const token = process.env.MCP_API_TOKEN;
   if (!token) throw new Error("Не настроен доступ к маркетплейсу");
-  const client = new Client({ name: "ryadom-search-agent", version: "0.1.0" });
-  const transport = new StreamableHTTPClientTransport(new URL(mcpEndpoint), { requestInit: { headers: { Authorization: `Bearer ${token}` } } });
-  try { await client.connect(transport); return await operation(client); }
-  finally { await client.close().catch(() => undefined); }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const client = new Client({ name: "ryadom-search-agent", version: "0.1.0" });
+    const transport = new StreamableHTTPClientTransport(new URL(mcpEndpoint), { requestInit: { headers: { Authorization: `Bearer ${token}` } } });
+    let connected = false;
+    try {
+      await client.connect(transport);
+      connected = true;
+      return await operation(client);
+    } catch (reason) {
+      if (connected || !isRateLimited(reason) || attempt === 2) throw reason;
+      await waitForMcp(1_100 * (attempt + 1));
+    } finally { await client.close().catch(() => undefined); }
+  }
+  throw new Error("MCP недоступен после повторных попыток");
 }
 
 async function callChecked<T>(client: Client, name: string, args: Record<string, unknown> = {}) {
-  const result = await client.callTool({ name, arguments: args }) as McpResult;
-  if (result.isError) throw new Error(result.content?.find((item) => item.type === "text")?.text || "Платформа отклонила запрос");
-  return unwrap<T>(result);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const result = await client.callTool({ name, arguments: args }) as McpResult;
+      if (result.isError) throw new Error(result.content?.find((item) => item.type === "text")?.text || "Платформа отклонила запрос");
+      return unwrap<T>(result);
+    } catch (reason) {
+      if (!isRateLimited(reason) || attempt === 2) throw reason;
+      await waitForMcp(1_100 * (attempt + 1));
+    }
+  }
+  throw new Error("MCP-инструмент недоступен после повторных попыток");
 }
 
 function extractOfferPrice(text: string) {
@@ -220,11 +246,9 @@ function extractOfferPrice(text: string) {
 
 async function inspectSalesInbox() {
   return withMcp(async (client) => {
-    const [profile, products, orders] = await Promise.all([
-      callChecked<{ id: string }>(client, "get_my_profile"),
-      callChecked<Product[]>(client, "get_my_products", { limit: 50 }),
-      callChecked<Order[]>(client, "get_my_orders", { role: "seller", limit: 100 }),
-    ]);
+    const profile = await callChecked<{ id: string }>(client, "get_my_profile");
+    const products = await callChecked<Product[]>(client, "get_my_products", { limit: 50 });
+    const orders = await callChecked<Order[]>(client, "get_my_orders", { role: "seller", limit: 100 });
     const productList = Array.isArray(products) ? products.filter((product) => ["ACTIVE", "RESERVED"].includes(product.status || "ACTIVE")) : [];
     const orderList = Array.isArray(orders) ? orders : [];
     const batches = await Promise.all(productList.slice(0, 24).map(async (product) => {
@@ -287,11 +311,9 @@ function replyMarker(message: Message) {
 
 async function processSalesInbox() {
   return withMcp(async (client) => {
-    const [profile, products, orders] = await Promise.all([
-      callChecked<{ id: string }>(client, "get_my_profile"),
-      callChecked<Product[]>(client, "get_my_products", { limit: 50 }),
-      callChecked<Order[]>(client, "get_my_orders", { role: "seller", limit: 100 }),
-    ]);
+    const profile = await callChecked<{ id: string }>(client, "get_my_profile");
+    const products = await callChecked<Product[]>(client, "get_my_products", { limit: 50 });
+    const orders = await callChecked<Order[]>(client, "get_my_orders", { role: "seller", limit: 100 });
     const payment = getTestPaymentDetails();
     const productList = Array.isArray(products) ? products.filter((product) => ["ACTIVE", "RESERVED"].includes(product.status || "ACTIVE")) : [];
     const orderList = Array.isArray(orders) ? orders : [];
@@ -366,10 +388,8 @@ async function processSalesInbox() {
         if (settlement.matches) {
           const successMarker = `Оплата заказа подтверждена и финализирована: ${paymentTotal.total_finalized_eth} ETH`;
           await callChecked(client, "complete_order", { order_id: accepted.id });
-          const [completedOrder, completedProduct] = await Promise.all([
-            callChecked<Order>(client, "get_order", { order_id: accepted.id }),
-            callChecked<Product>(client, "get_product", { product_id: product.id }),
-          ]);
+          const completedOrder = await callChecked<Order>(client, "get_order", { order_id: accepted.id });
+          const completedProduct = await callChecked<Product>(client, "get_product", { product_id: product.id });
           if (completedOrder.status !== "COMPLETED" && completedProduct.status !== "SOLD") throw new Error("Платформа ещё не подтвердила завершение заказа");
           if (!wasSent(conversation, profile.id, accepted.buyer_id, successMarker)) {
             await callChecked(client, "send_message", {
@@ -426,10 +446,8 @@ async function processSalesInbox() {
       const best = eligible[0];
       if (best?.order.buyer_id) {
         await callChecked(client, "accept_order", { order_id: best.order.id });
-        const [reservedProduct, acceptedOrder] = await Promise.all([
-          callChecked<Product>(client, "get_product", { product_id: product.id }),
-          callChecked<Order>(client, "get_order", { order_id: best.order.id }),
-        ]);
+        const reservedProduct = await callChecked<Product>(client, "get_product", { product_id: product.id });
+        const acceptedOrder = await callChecked<Order>(client, "get_order", { order_id: best.order.id });
         if (acceptedOrder.status !== "ACCEPTED" || reservedProduct.status !== "RESERVED") {
           throw new Error("Платформа не подтвердила перевод заказа в ACCEPTED и товара в RESERVED");
         }
@@ -512,10 +530,8 @@ function messageTime(message?: Message) {
 
 async function processPurchaseOrders() {
   return withMcp(async (client) => {
-    const [profile, orders] = await Promise.all([
-      callChecked<{ id: string }>(client, "get_my_profile"),
-      callChecked<Order[]>(client, "get_my_orders", { role: "buyer", limit: 100 }),
-    ]);
+    const profile = await callChecked<{ id: string }>(client, "get_my_profile");
+    const orders = await callChecked<Order[]>(client, "get_my_orders", { role: "buyer", limit: 100 });
     const orderList = Array.isArray(orders) ? orders.filter((order) => ["CREATED", "ACCEPTED"].includes(order.status)) : [];
     const actions: SaleAction[] = [];
 
@@ -606,10 +622,8 @@ async function processPurchaseOrders() {
         continue;
       }
 
-      const [freshProduct, freshOrder] = await Promise.all([
-        callChecked<Product>(client, "get_product", { product_id: productId }),
-        callChecked<Order>(client, "get_order", { order_id: order.id }),
-      ]);
+      const freshProduct = await callChecked<Product>(client, "get_product", { product_id: productId });
+      const freshOrder = await callChecked<Order>(client, "get_order", { order_id: order.id });
       if (freshProduct.status !== "RESERVED" || freshOrder.status !== "ACCEPTED") {
         await callChecked(client, "send_message", { product_id: productId, order_id: order.id, text: "Реквизиты получены, но продавец ещё не подтвердил заказ и не снял товар с открытой продажи. Подтвердите заказ: платформа должна вернуть ACCEPTED, а товар — RESERVED." });
         actions.push({ kind: "reserve_requested", product_id: productId, order_id: order.id, detail: "Перед оплатой повторно запрошен RESERVED" });
