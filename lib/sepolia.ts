@@ -1,4 +1,6 @@
-import { formatEther, getAddress, isAddress, isHash } from "viem";
+import { createWalletClient, formatEther, getAddress, http, isAddress, isHash, parseEther } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { sepolia } from "viem/chains";
 
 export type PaymentDetails = {
   network: "Ethereum Sepolia";
@@ -24,6 +26,14 @@ const chainId = 11155111 as const;
 const amountEth = "0.0001";
 const valueWeiHex = "0x5af3107a4000";
 
+export type SentTestPayment = {
+  hash: `0x${string}`;
+  from: string;
+  to: string;
+  amount_eth: string;
+  explorer_url: string;
+};
+
 export function getTestPaymentDetails(): PaymentDetails {
   const configured = process.env.SEPOLIA_PAYMENT_ADDRESS || "";
   if (!isAddress(configured)) throw new Error("Тестовый платёжный адрес пока не настроен");
@@ -38,6 +48,19 @@ export function getTestPaymentDetails(): PaymentDetails {
     explorer_url: `https://sepolia.etherscan.io/address/${address}`,
     faucet_url: "https://ethereum.org/developers/docs/networks/#sepolia",
   };
+}
+
+export async function sendTestPayment(recipientValue: unknown): Promise<SentTestPayment> {
+  const recipient = typeof recipientValue === "string" ? recipientValue.trim() : "";
+  if (!isAddress(recipient)) throw new Error("Продавец прислал некорректный Ethereum-адрес");
+  const configuredKey = process.env.SEPOLIA_PAYMENT_PRIVATE_KEY || "";
+  if (!/^0x[0-9a-fA-F]{64}$/.test(configuredKey)) throw new Error("Тестовый кошелёк покупателя не настроен");
+  const account = privateKeyToAccount(configuredKey as `0x${string}`);
+  const rpcUrl = process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com";
+  const client = createWalletClient({ account, chain: sepolia, transport: http(rpcUrl) });
+  const to = getAddress(recipient);
+  const hash = await client.sendTransaction({ account, chain: sepolia, to, value: parseEther(amountEth) });
+  return { hash, from: account.address, to, amount_eth: amountEth, explorer_url: `https://sepolia.etherscan.io/tx/${hash}` };
 }
 
 export async function verifyTestPayment(hashValue: unknown): Promise<PaymentDetails> {

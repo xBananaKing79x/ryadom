@@ -70,7 +70,11 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(agentRoute, /inspect_sales_inbox/);
   assert.match(agentRoute, /process_sales_inbox/);
   assert.match(agentRoute, /start_purchase/);
+  assert.match(agentRoute, /process_purchase_orders/);
+  assert.match(agentRoute, /automation === "deals"/);
+  assert.ok(agentRoute.indexOf('freshProduct.status !== "RESERVED"') < agentRoute.indexOf("sendTestPayment(wallet)"));
   assert.match(agentRoute, /listedPrice \* 0\.9/);
+  assert.match(agentRoute, /listedPrice \* 0\.7/);
   assert.match(agentRoute, /"accept_order"/);
   assert.match(agentRoute, /"complete_order"/);
   assert.match(agentRoute, /"send_message"/);
@@ -82,6 +86,8 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(sepolia, /eth_getTransactionReceipt/);
   assert.match(sepolia, /eth_getBlockByNumber/);
   assert.match(sepolia, /"finalized"/);
+  assert.match(sepolia, /sendTestPayment/);
+  assert.match(sepolia, /SEPOLIA_PAYMENT_PRIVATE_KEY/);
   assert.match(sepolia, /recipient_matches/);
   assert.match(sepolia, /SEPOLIA_PAYMENT_ADDRESS/);
   assert.doesNotMatch(app, /SEPOLIA_PAYMENT_PRIVATE_KEY/);
@@ -95,6 +101,7 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /requestSubmit\(\)/);
   assert.match(app, /agentChatRef/);
   assert.match(app, /chat\.scrollHeight/);
+  assert.match(app, /Провести покупки/);
   assert.match(app, /createAgentOrder/);
   assert.match(app, /acceptAgentOrder/);
   assert.match(app, /reserveAgentOffer/);
