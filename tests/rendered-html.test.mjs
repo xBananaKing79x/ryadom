@@ -62,6 +62,14 @@ test("keeps MCP writes server-side and explicitly allowlisted", async () => {
   assert.match(app, /notification-button/);
   assert.match(app, /Отметить все прочитанными/);
   assert.match(app, /ryadom:read-messages/);
+  assert.match(app, /hydrateMessageProfiles/);
+  assert.match(app, /"get_profile", \{ user_id: id \}/);
+  assert.match(app, /messageAuthor\(message\)/);
+  assert.match(app, /message-author/);
+  assert.match(app, /hydrateParticipantProfiles/);
+  assert.match(app, /participantNames\[order\.buyer_id\]/);
+  assert.match(app, /agent-order-product/);
+  assert.match(app, /Заказчик/);
   assert.match(app, /product\.status\?\.toUpperCase\(\) !== "REMOVED"/);
   assert.match(app, /setMyProducts\(\(current\) => current\.filter\(\(item\) => item\.id !== product\.id\)\)/);
   assert.ok(image.byteLength > 100_000);
