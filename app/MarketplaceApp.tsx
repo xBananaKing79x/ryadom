@@ -16,6 +16,10 @@ type AgentMessage = { role: "user" | "assistant"; content: string };
 type PlatformStats = { listings: number; sellers: number; updated_at: string };
 type PaymentDetails = { network: "Ethereum Sepolia"; chain_id: number; address: string; currency: "SepoliaETH"; amount_eth: string; value_wei_hex: string; explorer_url: string; faucet_url: string; transaction?: { hash: string; status: "pending" | "confirmed" | "failed" | "not_found"; finalized: boolean; recipient_matches: boolean; amount_matches: boolean; expected_amount_eth: string; amount_eth?: string; block_number?: number; explorer_url: string } };
 type EthereumProvider = { request: (input: { method: string; params?: unknown[] }) => Promise<unknown> };
+type SpeechRecognitionResultLike = { 0?: { transcript?: string }; isFinal?: boolean };
+type SpeechRecognitionEventLike = { results: ArrayLike<SpeechRecognitionResultLike> };
+type SpeechRecognitionLike = { lang: string; continuous: boolean; interimResults: boolean; start: () => void; stop: () => void; abort: () => void; onresult: ((event: SpeechRecognitionEventLike) => void) | null; onerror: ((event: { error?: string }) => void) | null; onend: (() => void) | null };
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 type Panel = "profile" | "products" | "orders" | "messages" | "agent" | "product" | "create" | "edit" | null;
 
 const categories = [
@@ -126,6 +130,9 @@ export function MarketplaceApp() {
   const [agentRelistCandidates, setAgentRelistCandidates] = useState<Product[]>([]);
   const [agentSending, setAgentSending] = useState(false);
   const [agentError, setAgentError] = useState("");
+  const [agentDraft, setAgentDraft] = useState("");
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [voiceListening, setVoiceListening] = useState(false);
   const [agentPayment, setAgentPayment] = useState<PaymentDetails | null>(null);
   const [paymentSending, setPaymentSending] = useState(false);
   const [agentButtonPosition, setAgentButtonPosition] = useState<{ x: number; y: number } | null>(null);
@@ -137,6 +144,7 @@ export function MarketplaceApp() {
   const agentSeenMessageIds = useRef<Set<string> | null>(null);
   const agentPollOwner = useRef("");
   const agentAutomationFailures = useRef(0);
+  const voiceRecognition = useRef<SpeechRecognitionLike | null>(null);
 
   const showToast = useCallback((text: string) => {
     setToast(text); if (toastTimer.current) clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(""), 3500);
@@ -234,6 +242,12 @@ export function MarketplaceApp() {
     void loadPlatformStats();
     const interval = setInterval(() => void loadPlatformStats(), 5 * 60 * 1000);
     return () => { stopped = true; clearInterval(interval); };
+  }, []);
+
+  useEffect(() => {
+    const speechWindow = window as typeof window & { SpeechRecognition?: SpeechRecognitionConstructor; webkitSpeechRecognition?: SpeechRecognitionConstructor };
+    const timer = setTimeout(() => setVoiceSupported(Boolean(speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition)), 0);
+    return () => { clearTimeout(timer); voiceRecognition.current?.abort(); };
   }, []);
 
   useEffect(() => {
@@ -466,11 +480,35 @@ export function MarketplaceApp() {
 
   async function submitAgentTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    const text = String(form.get("agent_task") || "");
-    formElement.reset();
+    const text = agentDraft;
+    if (!text.trim()) return;
+    setAgentDraft("");
     await runAgentTask(text);
+  }
+
+  function toggleVoiceInput() {
+    if (voiceListening) { voiceRecognition.current?.stop(); return; }
+    const speechWindow = window as typeof window & { SpeechRecognition?: SpeechRecognitionConstructor; webkitSpeechRecognition?: SpeechRecognitionConstructor };
+    const Recognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+    if (!Recognition) { setAgentError("Голосовой ввод не поддерживается этим браузером. Можно продолжить печатать текстом."); return; }
+    const recognition = new Recognition();
+    const initialDraft = agentDraft.trim();
+    recognition.lang = "ru-RU";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results).map((result) => result[0]?.transcript || "").join(" ").trim();
+      setAgentDraft([initialDraft, transcript].filter(Boolean).join(initialDraft && transcript ? " " : ""));
+    };
+    recognition.onerror = (event) => {
+      if (!["aborted", "no-speech"].includes(event.error || "")) setAgentError("Не удалось распознать речь. Проверьте доступ к микрофону и попробуйте ещё раз.");
+    };
+    recognition.onend = () => { setVoiceListening(false); voiceRecognition.current = null; };
+    voiceRecognition.current = recognition;
+    setAgentError("");
+    setVoiceListening(true);
+    try { recognition.start(); }
+    catch { setVoiceListening(false); voiceRecognition.current = null; setAgentError("Микрофон уже используется. Попробуйте ещё раз."); }
   }
 
   async function createAgentOrder(product: Product) {
@@ -743,7 +781,7 @@ export function MarketplaceApp() {
         {agentOffers.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Сообщения и предложения</strong><span>{agentOffers.length}</span></div><div className="agent-offer-list">{agentOffers.map((offer) => { const listed = Number(offer.product.price); const belowPrice = offer.offered_price !== undefined && offer.offered_price < listed; return <article className={belowPrice ? "agent-offer below-price" : "agent-offer"} key={offer.message.id}><button className="agent-offer-product" onClick={() => openProduct(offer.product)} type="button"><span className={`agent-offer-product-image category-${offer.product.category}`}>{offer.product.image ? <img src={offer.product.image} alt={offer.product.title} /> : categoryNames[offer.product.category]}</span><span><small>{statusNames[offer.product.status || "ACTIVE"]}</small><strong>{offer.product.title}</strong><p>{offer.product.description || "Описание пока не добавлено"}</p></span><b>{money(offer.product.price)}</b></button><blockquote>{offer.message.text}</blockquote>{offer.offered_price !== undefined && <div className="agent-price-check"><span>Предложение покупателя</span><strong>{money(offer.offered_price)}</strong>{belowPrice && <i>ниже на {money(listed - offer.offered_price)}</i>}</div>}<div className="agent-offer-actions"><button disabled={acting} onClick={() => void replyAboutAvailability(offer)} type="button">Ответить о наличии</button>{!offer.order && offer.offered_price !== undefined && <button disabled={acting} onClick={() => void requestOrderForOffer(offer)} type="button">Попросить создать заказ</button>}{offer.order?.status === "CREATED" && <button disabled={acting} onClick={() => void reserveAgentOffer(offer)} type="button">Поставить в резерв</button>}{offer.order?.status === "ACCEPTED" && <button disabled={acting} onClick={() => void approveAgentOffer(offer)} type="button">Разрешить продажу</button>}{offer.order && ["CREATED", "ACCEPTED"].includes(offer.order.status) && <button className="danger-action" disabled={acting} onClick={() => void declineAgentOffer(offer)} type="button">Отказать</button>}</div></article>; })}</div><p className="agent-order-note">Временный режим: предложенная цена фиксируется в сообщениях. MCP-заказ по-прежнему хранит цену объявления.</p></div>}
         {agentRelistCandidates.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>К перепродаже с наценкой 15%</strong><span>{agentRelistCandidates.length}</span></div><div className="agent-product-strip">{agentRelistCandidates.map((product) => <article className="agent-product-card" key={product.id}><div className={`agent-product-image category-${product.category}`}>{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Товар"}</span>}<i>Куплено</i></div><div><small>{categoryNames[product.category] || product.category}</small><h3>{product.title}</h3><strong>{money(Math.round(Number(product.price) * 1.15 * 100) / 100)}</strong><div className="agent-card-actions single"><button disabled={acting} onClick={() => void relistPurchasedProduct(product)} type="button">Выставить на продажу</button></div></div></article>)}</div></div>}
         {agentSortedOrders.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Входящие заказы</strong><span>{agentSortedOrders.length}</span></div><div className="agent-order-list">{agentSortedOrders.map((order) => <article className={order.id === bestAgentOrderId ? "agent-order recommended" : "agent-order"} key={order.id}><div>{order.id === bestAgentOrderId && <span className="agent-recommendation">Рекомендация агента</span>}<strong>{order.product?.title || `Заказ ${order.id.slice(0, 8)}`}</strong><small>{statusNames[order.status] || order.status} · {shortDate(order.created_at)}</small></div><div><strong>{order.product ? money(order.product.price) : "Цена объявления"}</strong>{order.status === "CREATED" && <button disabled={acting} onClick={() => void acceptAgentOrder(order)} type="button">Подтвердить</button>}</div></article>)}</div><p className="agent-order-note">MCP не хранит отдельную цену предложения: сравнение выполняется по цене объявления. При равенстве агент не обещает несуществующую выгоду.</p></div>}
-        <form className="agent-composer" onSubmit={submitAgentTask}><textarea aria-label="Задача агенту" disabled={agentSending} enterKeyHint="send" name="agent_task" required maxLength={4000} placeholder="Например: найди городской велосипед до 35 000 ₽…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (event.currentTarget.value.trim()) event.currentTarget.form?.requestSubmit(); } }} /><button disabled={agentSending} type="submit">{agentSending ? "Думаю…" : "Отправить ↗"}</button></form>
+        <form className="agent-composer" onSubmit={submitAgentTask}><textarea aria-label="Задача агенту" disabled={agentSending} enterKeyHint="send" name="agent_task" required maxLength={4000} placeholder="Например: найди городской велосипед до 35 000 ₽…" value={agentDraft} onChange={(event) => setAgentDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (event.currentTarget.value.trim()) event.currentTarget.form?.requestSubmit(); } }} /><button className={`agent-voice-button ${voiceListening ? "listening" : ""}`} aria-label={voiceListening ? "Остановить запись" : "Продиктовать задачу агенту"} aria-pressed={voiceListening} disabled={agentSending || !voiceSupported} onClick={toggleVoiceInput} title={voiceSupported ? "Голосовой ввод" : "Голосовой ввод не поддерживается браузером"} type="button"><span aria-hidden="true">●</span>{voiceListening ? "Слушаю…" : "Голос"}</button><button disabled={agentSending || !agentDraft.trim()} type="submit">{agentSending ? "Думаю…" : "Отправить ↗"}</button></form>
       </section>
     </div></Modal>}
 

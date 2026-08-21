@@ -151,6 +151,10 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /event\.key === "Enter"/);
   assert.match(app, /!event\.shiftKey/);
   assert.match(app, /requestSubmit\(\)/);
+  assert.match(app, /webkitSpeechRecognition/);
+  assert.match(app, /recognition\.lang = "ru-RU"/);
+  assert.match(app, /Продиктовать задачу агенту/);
+  assert.match(app, /voiceListening/);
   assert.match(app, /agentChatRef/);
   assert.match(app, /chat\.scrollHeight/);
   assert.match(app, /setInterval\(\(\) => void tick\(\), 5_000\)/);

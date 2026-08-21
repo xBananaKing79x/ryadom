@@ -202,3 +202,8 @@ footer .brand-mark{box-shadow:none}footer>button{color:var(--violet)}
 @media(max-width:780px){.platform-stats{width:calc(100% - 20px);grid-template-columns:1fr;padding:27px 22px 18px}.platform-stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.platform-stats-copy h2{font-size:29px}}
 @media(max-width:480px){.platform-stats-grid{grid-template-columns:1fr}.platform-stats-grid article{min-height:125px}.platform-stats>small{text-align:left}}
 @media(prefers-reduced-transparency:reduce){.platform-stats,.platform-stats-grid article{background:#f8fafc;backdrop-filter:none}}
+
+/* Voice input for the agent. */
+.agent-composer{grid-template-columns:minmax(0,1fr) auto auto;align-items:stretch}.agent-composer .agent-voice-button{min-width:82px;padding:0 12px;display:flex;align-items:center;justify-content:center;gap:7px;border:1px solid rgba(10,132,255,.18);background:rgba(10,132,255,.08);color:#0768c8}.agent-composer .agent-voice-button>span{width:8px;height:8px;border-radius:50%;background:currentColor}.agent-composer .agent-voice-button.listening{border-color:rgba(255,69,58,.22);background:rgba(255,69,58,.1);color:#d92d27}.agent-composer .agent-voice-button.listening>span{animation:voice-pulse 1.15s ease-in-out infinite}.agent-composer .agent-voice-button:disabled{background:rgba(118,128,140,.08);color:#9b9fa6;cursor:not-allowed}@keyframes voice-pulse{50%{transform:scale(1.65);opacity:.45}}
+@media(max-width:760px){.agent-composer{grid-template-columns:1fr 1fr}.agent-composer textarea{grid-column:1/-1}.agent-composer .agent-voice-button{padding:12px}}
+@media(prefers-reduced-motion:reduce){.agent-composer .agent-voice-button.listening>span{animation:none}}
