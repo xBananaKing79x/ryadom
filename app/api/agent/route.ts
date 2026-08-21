@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { NextResponse } from "next/server";
-import { getTestPaymentDetails, PaymentDetails, sendTestPayment, verifyTestPayment } from "../../../lib/sepolia";
+import { getTestPaymentDetails, PaymentDetails, quoteRubPriceInEth, sendTestPayment, verifyTestPayment } from "../../../lib/sepolia";
 
 export const dynamic = "force-dynamic";
 
@@ -112,7 +112,7 @@ const tools = [
     type: "function",
     function: {
       name: "process_purchase_orders",
-      description: "Автономно продолжить покупки: торговаться с продавцами, запросить финальную цену и резерв, найти кошелёк в сообщениях продавца или описании товара, проверить RESERVED и отправить тестовый Sepolia-платёж с последующей отправкой хэша в чат.",
+      description: "Автономно продолжить покупки: торговаться, проверить резерв, найти кошелёк, проверить зафиксированный расчёт цены объявления в ETH и отправить точную сумму SepoliaETH с хэшем в чат.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -149,7 +149,7 @@ ACTIVE — доступен для покупки, RESERVED — товар на 
 После поиска кратко объясни выбор. Не выдумывай товары, цены, изображения, id и статусы.
 Пользователь делегировал тебе проведение сделок. Для покупки по выбранному товару используй start_purchase, а для продолжения торга, резерва и оплаты — process_purchase_orders. Для проверки и ведения продаж используй process_sales_inbox; inspect_sales_inbox оставь для просмотра без действий. Если просит перепродать купленные товары — inspect_completed_purchases.
 Цена из сообщения остаётся неформальным предложением, потому что MCP не хранит цену торга в заказе. Покупатель начинает торг с 70% цены объявления. Для продажи автоматически допустима цена не ниже 90% цены объявления; более высокая цена тоже допустима. Среди допустимых CREATED-заказов выбирай самый высокий. На цену ниже порога продавец сообщает минимальную допустимую цену и оставляет заказ открытым для продолжения торга.
-После accept_order агент продавца обязан повторно проверить: заказ стал ACCEPTED, товар стал RESERVED. Только затем он сообщает покупателю публичный кошелёк Ethereum Sepolia и просит полный хэш. Агент покупателя ищет кошелёк и в сообщениях продавца, и в описании товара, но платит только после своей проверки RESERVED. Сделка завершается только когда транзакция успешна, адрес получателя совпал и блок финализирован. Затем агент продавца подтверждает получение в сообщении и вызывает complete_order, переводя товар в SOLD. До этого не заявляй, что товар продан.
+После accept_order агент продавца обязан повторно проверить: заказ стал ACCEPTED, товар стал RESERVED. Только затем он фиксирует spot-курс ETH/RUB, пересчитывает цену объявления в ETH, сообщает расчёт и публичный кошелёк Ethereum Sepolia. Агент покупателя ищет кошелёк в сообщениях или описании товара, но платит только после проверки RESERVED и корректности расчёта цены объявления. Сделка завершается только когда транзакция успешна, адрес совпал, фактическая сумма не меньше зафиксированной суммы ETH и блок финализирован. Затем агент продавца подтверждает получение и вызывает complete_order. До этого не заявляй, что товар продан.
 Текущий MCP не содержит цены предложения: все заказы создаются по цене объявления. После подтверждения заказ становится ACCEPTED, товар — RESERVED, остальные CREATED-заявки отменяются. Не обещай аукцион или приём новых заявок на RESERVED-товар. Если цены заказов равны, скажи об этом прямо.
 Оплата в блокчейне используется только для демонстрации в тестовой сети Sepolia, тестовый ETH не имеет денежной ценности. Если просят адрес или оплату, вызови get_test_payment_details. Если пользователь прислал хэш, обязательно вызови verify_test_payment. Не говори, что перевод окончательно получен, если статус не confirmed, finalized не true, получатель не совпадает или хэш не найден. Не говори, что агент покупателя отправил перевод, пока кошелёк не вернул настоящий хэш транзакции.`;
 
@@ -220,6 +220,22 @@ function extractTransactionHash(text: string) {
   return text.match(/0x[0-9a-fA-F]{64}/)?.[0];
 }
 
+function extractEthPaymentQuote(text: string) {
+  const match = text.match(/Расчёт оплаты:\s*([\d\s.,]+)\s*₽\s*÷\s*([\d\s.,]+)\s*₽\/ETH\s*=\s*([\d.,]+)\s*(?:Sepolia)?ETH/i);
+  if (!match) return undefined;
+  const number = (value: string) => Number(value.replace(/\s/g, "").replace(",", "."));
+  const rubAmount = number(match[1]);
+  const ethRubRate = number(match[2]);
+  const amountEth = number(match[3]);
+  if (![rubAmount, ethRubRate, amountEth].every((value) => Number.isFinite(value) && value > 0)) return undefined;
+  return { rub_amount: rubAmount, eth_rub_rate: ethRubRate, amount_eth: amountEth.toFixed(8) };
+}
+
+function quoteMatchesListing(quote: ReturnType<typeof extractEthPaymentQuote>, listedPrice: number) {
+  if (!quote || Math.abs(quote.rub_amount - listedPrice) > 0.01) return false;
+  return Math.abs(quote.rub_amount / quote.eth_rub_rate - Number(quote.amount_eth)) <= 0.00000001;
+}
+
 function wasSent(messages: Message[], profileId: string, receiverId: string | undefined, fragment: string) {
   return messages.some((message) => message.sender_id === profileId && (!receiverId || message.receiver_id === receiverId) && message.text.includes(fragment));
 }
@@ -253,15 +269,18 @@ async function processSalesInbox() {
           continue;
         }
         const conversation = productMessages.filter((message) => message.sender_id === accepted.buyer_id || message.receiver_id === accepted.buyer_id);
-        const walletMarker = `Кошелёк Sepolia: ${payment.address}`;
-        if (!wasSent(conversation, profile.id, accepted.buyer_id, walletMarker)) {
+        let lockedQuote = conversation.filter((message) => message.sender_id === profile.id).map((message) => extractEthPaymentQuote(message.text)).find((quote) => quoteMatchesListing(quote, listedPrice));
+        const quoteMarker = `Расчёт оплаты: ${listedPrice.toFixed(2)} ₽`;
+        if (!lockedQuote) {
+          const quote = await quoteRubPriceInEth(listedPrice);
+          lockedQuote = { rub_amount: Number(quote.rub_amount), eth_rub_rate: Number(quote.eth_rub_rate), amount_eth: quote.amount_eth };
           await callChecked(client, "send_message", {
             product_id: product.id,
             order_id: accepted.id,
             receiver_id: accepted.buyer_id,
-            text: `Товар «${product.title}» зарезервирован за вами. Для тестовой оплаты переведите ${payment.amount_eth} SepoliaETH. ${walletMarker}. Сеть: Ethereum Sepolia, Chain ID ${payment.chain_id}. После отправки пришлите полный хэш транзакции 0x…`,
+            text: `Товар «${product.title}» зарезервирован за вами. ${quoteMarker} ÷ ${quote.eth_rub_rate} ₽/ETH = ${quote.amount_eth} ETH по spot-курсу Coinbase, зафиксированному ${quote.quoted_at}. Переведите ровно ${quote.amount_eth} SepoliaETH. Кошелёк Sepolia: ${payment.address}. Сеть: Ethereum Sepolia, Chain ID ${payment.chain_id}. После отправки пришлите полный хэш транзакции 0x…`,
           });
-          actions.push({ kind: "wallet_sent", product_id: product.id, order_id: accepted.id, detail: "Покупателю отправлены реквизиты Sepolia" });
+          actions.push({ kind: "wallet_sent", product_id: product.id, order_id: accepted.id, detail: `Покупателю отправлены реквизиты и расчёт ${quote.amount_eth} ETH` });
         }
 
         const transactionHash = conversation
@@ -269,28 +288,28 @@ async function processSalesInbox() {
           .map((message) => extractTransactionHash(message.text))
           .find(Boolean);
         if (!transactionHash) continue;
-        const verification = await verifyTestPayment(transactionHash);
+        const verification = await verifyTestPayment(transactionHash, { address: payment.address, amount_eth: lockedQuote.amount_eth });
         const transaction = verification.transaction;
-        if (transaction?.status === "confirmed" && transaction.finalized && transaction.recipient_matches) {
+        if (transaction?.status === "confirmed" && transaction.finalized && transaction.recipient_matches && transaction.amount_matches) {
           const successMarker = `Оплата подтверждена и финализирована: ${transactionHash}`;
           if (!wasSent(conversation, profile.id, accepted.buyer_id, successMarker)) {
             await callChecked(client, "send_message", {
               product_id: product.id,
               order_id: accepted.id,
               receiver_id: accepted.buyer_id,
-              text: `${successMarker}. Средства получены, спасибо! Сделка завершена, товар отмечен как проданный.`,
+              text: `${successMarker}. Получено ${transaction.amount_eth} ETH — не меньше требуемых ${transaction.expected_amount_eth} ETH по цене объявления. Сделка завершена, товар отмечен как проданный.`,
             });
           }
           await callChecked(client, "complete_order", { order_id: accepted.id });
           actions.push({ kind: "sold", product_id: product.id, order_id: accepted.id, detail: "Транзакция финализирована, товар переведён в SOLD" });
-        } else if (transaction?.status === "pending" || (transaction?.status === "confirmed" && !transaction.finalized)) {
+        } else if ((transaction?.status === "pending" || (transaction?.status === "confirmed" && !transaction.finalized)) && transaction.recipient_matches && transaction.amount_matches) {
           actions.push({ kind: "payment_pending", product_id: product.id, order_id: accepted.id, detail: "Транзакция найдена, агент ждёт финализации" });
         } else if (transaction && !wasSent(conversation, profile.id, accepted.buyer_id, `Проверка транзакции ${transactionHash}`)) {
           await callChecked(client, "send_message", {
             product_id: product.id,
             order_id: accepted.id,
             receiver_id: accepted.buyer_id,
-            text: `Проверка транзакции ${transactionHash}: платёж не подтверждён или отправлен не на указанный кошелёк. Товар остаётся в резерве; пришлите корректный хэш после успешного перевода.`,
+            text: `Проверка транзакции ${transactionHash}: платёж не подтверждён, отправлен не на указанный кошелёк или сумма меньше ${transaction.expected_amount_eth} ETH. Товар остаётся в резерве; пришлите корректный хэш после полного перевода.`,
           });
           actions.push({ kind: "payment_invalid", product_id: product.id, order_id: accepted.id, detail: "Покупателю запрошен корректный платёж" });
         }
@@ -326,14 +345,15 @@ async function processSalesInbox() {
         if (acceptedOrder.status !== "ACCEPTED" || reservedProduct.status !== "RESERVED") {
           throw new Error("Платформа не подтвердила перевод заказа в ACCEPTED и товара в RESERVED");
         }
+        const quote = await quoteRubPriceInEth(listedPrice);
         actions.push({ kind: "reserved", product_id: product.id, order_id: best.order.id, detail: `Принято лучшее предложение ${best.offeredPrice.toFixed(2)} ₽` });
         await callChecked(client, "send_message", {
           product_id: product.id,
           order_id: best.order.id,
           receiver_id: best.order.buyer_id,
-          text: `Предложение ${best.offeredPrice.toFixed(2)} ₽ принято. Товар «${product.title}» зарезервирован за вами. Для тестовой оплаты переведите ${payment.amount_eth} SepoliaETH. Кошелёк Sepolia: ${payment.address}. Сеть: Ethereum Sepolia, Chain ID ${payment.chain_id}. После отправки пришлите полный хэш транзакции 0x…`,
+          text: `Предложение ${best.offeredPrice.toFixed(2)} ₽ принято. Товар «${product.title}» зарезервирован за вами. Расчёт оплаты: ${quote.rub_amount} ₽ ÷ ${quote.eth_rub_rate} ₽/ETH = ${quote.amount_eth} ETH по spot-курсу Coinbase, зафиксированному ${quote.quoted_at}. Переведите ровно ${quote.amount_eth} SepoliaETH. Кошелёк Sepolia: ${payment.address}. Сеть: Ethereum Sepolia, Chain ID ${payment.chain_id}. После отправки пришлите полный хэш транзакции 0x…`,
         });
-        actions.push({ kind: "wallet_sent", product_id: product.id, order_id: best.order.id, detail: "Покупателю отправлены реквизиты Sepolia" });
+        actions.push({ kind: "wallet_sent", product_id: product.id, order_id: best.order.id, detail: `Покупателю отправлены реквизиты и расчёт ${quote.amount_eth} ETH` });
         continue;
       }
 
@@ -427,6 +447,7 @@ async function processPurchaseOrders() {
       const walletFromMessages = sellerMessages.map((message) => extractWalletAddress(message.text)).find(Boolean);
       const walletFromDescription = extractWalletAddress(product.description || "");
       const wallet = walletFromMessages ?? walletFromDescription;
+      const paymentQuote = sellerMessages.map((message) => extractEthPaymentQuote(message.text)).find((quote) => quoteMatchesListing(quote, listedPrice));
       const productReserved = product.status === "RESERVED" && order.status === "ACCEPTED";
 
       if (!productReserved) {
@@ -462,11 +483,11 @@ async function processPurchaseOrders() {
         continue;
       }
 
-      if (!wallet) {
-        const marker = "пришлите номер кошелька Ethereum Sepolia";
+      if (!wallet || !paymentQuote) {
+        const marker = "пришлите номер кошелька Ethereum Sepolia и точный расчёт суммы ETH";
         if (!wasSent(conversation, profile.id, sellerId, marker)) {
-          await callChecked(client, "send_message", { product_id: productId, order_id: order.id, text: `Товар зарезервирован. Пожалуйста, ${marker} для тестового перевода ${getTestPaymentDetails().amount_eth} SepoliaETH.` });
-          actions.push({ kind: "wallet_requested", product_id: productId, order_id: order.id, detail: "У продавца запрошен кошелёк Sepolia" });
+          await callChecked(client, "send_message", { product_id: productId, order_id: order.id, text: `Товар зарезервирован. Пожалуйста, ${marker}: цена объявления ${listedPrice.toFixed(2)} ₽, курс ETH/RUB и итоговая сумма должны быть зафиксированы в сообщении сделки.` });
+          actions.push({ kind: "wallet_requested", product_id: productId, order_id: order.id, detail: "У продавца запрошены кошелёк и расчёт ETH по цене объявления" });
         }
         continue;
       }
@@ -478,7 +499,7 @@ async function processPurchaseOrders() {
         continue;
       }
 
-      const sent = await sendTestPayment(wallet);
+      const sent = await sendTestPayment(wallet, paymentQuote.amount_eth);
       await callChecked(client, "send_message", {
         product_id: productId,
         order_id: order.id,
@@ -519,7 +540,7 @@ async function searchProductsBySellerName(args: Record<string, unknown>) {
     const productList = Array.isArray(products) ? products : [];
     const sellerIds = [...new Set(productList.map((product) => product.seller_id).filter((id): id is string => Boolean(id)))];
     const profiles = await Promise.all(sellerIds.map(async (profileId) => {
-      try { return await callChecked<Profile>(client, "get_profile", { profile_id: profileId }); }
+      try { return await callChecked<Profile>(client, "get_profile", { user_id: profileId }); }
       catch { return undefined; }
     }));
     const matchingSellerIds = new Set(profiles.filter((profile): profile is Profile => Boolean(profile)).filter((profile) => {
