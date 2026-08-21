@@ -7,7 +7,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "Рядом — всё нужное поблизости",
     description: "Покупайте и продавайте вещи людям рядом.",
-    images: [{ url: "/hero-marketplace.png", width: 1672, height: 941, alt: "Рядом — маркетплейс хороших находок" }],
+    images: [{ url: "/hero-marketplace-v2.png", width: 1672, height: 941, alt: "Рядом — маркетплейс хороших находок" }],
   },
   icons: {
     icon: "/favicon.svg",
