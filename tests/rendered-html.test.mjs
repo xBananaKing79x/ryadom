@@ -22,6 +22,7 @@ test("server-renders the marketplace shell", async () => {
   assert.match(html, /Найдётся/);
   assert.match(html, /Что ищем сегодня/);
   assert.match(html, /Мои продукты/);
+  assert.match(html, /src="\/hero-marketplace-v3\.png"/);
   assert.doesNotMatch(html, /MCP_API_TOKEN|c2c_6_/i);
 });
 

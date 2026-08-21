@@ -575,7 +575,7 @@ export function MarketplaceApp() {
 
     <section className="hero">
       <div className="hero-copy"><p className="eyebrow">Маркетплейс своего города</p><h1>Найдётся <em>рядом</em></h1><p className="hero-description">Лови классные вещи, общайся напрямую и забирай без долгого ожидания.</p><div className="hero-tags" aria-label="Преимущества"><span>⚡ Быстро</span><span>☺ Без комиссий</span><span>↗ Из рук в руки</span></div></div>
-      <div className="hero-art" aria-label="Подборка вещей с площадки"><div className="hero-art-image" /><span className="art-sticker">бережно<br />из рук в руки</span><span className="art-spark">✦</span></div>
+      <div className="hero-art"><div className="hero-art-image"><img src="/hero-marketplace-v3.png" alt="Велосипед, одежда, техника и посылка с площадки «Рядом»" fetchPriority="high" /></div><span className="art-sticker">бережно<br />из рук в руки</span><span className="art-spark">✦</span></div>
     </section>
 
     <section className="search-zone" aria-label="Поиск объявлений">
