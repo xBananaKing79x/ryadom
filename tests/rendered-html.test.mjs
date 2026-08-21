@@ -72,6 +72,9 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(agentRoute, /start_purchase/);
   assert.match(agentRoute, /process_purchase_orders/);
   assert.match(agentRoute, /automation === "deals"/);
+  assert.match(agentRoute, /walletFromDescription/);
+  assert.match(agentRoute, /acceptedOrder.status !== "ACCEPTED"/);
+  assert.match(agentRoute, /reservedProduct.status !== "RESERVED"/);
   assert.ok(agentRoute.indexOf('freshProduct.status !== "RESERVED"') < agentRoute.indexOf("sendTestPayment(wallet)"));
   assert.match(agentRoute, /listedPrice \* 0\.9/);
   assert.match(agentRoute, /listedPrice \* 0\.7/);
@@ -117,4 +120,10 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /Проверить счёт/);
   assert.match(app, /verifyDealTransaction/);
   assert.ok(app.indexOf("deal-settlement") < app.indexOf("deal-chat-panel"));
+});
+
+test("renders key attributes in agent product miniatures", async () => {
+  const app = await readFile(new URL("../app/MarketplaceApp.tsx", import.meta.url), "utf8");
+  assert.match(app, /product\.description \|\| "Описание пока не добавлено"/);
+  assert.match(app, /money\(product\.price\)/);
 });

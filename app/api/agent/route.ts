@@ -90,7 +90,7 @@ const tools = [
     type: "function",
     function: {
       name: "process_purchase_orders",
-      description: "Автономно продолжить покупки: торговаться с продавцами, запросить финальную цену, резерв и кошелёк, проверить RESERVED и отправить тестовый Sepolia-платёж с последующей отправкой хэша в чат.",
+      description: "Автономно продолжить покупки: торговаться с продавцами, запросить финальную цену и резерв, найти кошелёк в сообщениях продавца или описании товара, проверить RESERVED и отправить тестовый Sepolia-платёж с последующей отправкой хэша в чат.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -127,7 +127,7 @@ ACTIVE — доступен для покупки, RESERVED — товар на 
 После поиска кратко объясни выбор. Не выдумывай товары, цены, изображения, id и статусы.
 Пользователь делегировал тебе проведение сделок. Для покупки по выбранному товару используй start_purchase, а для продолжения торга, резерва и оплаты — process_purchase_orders. Для проверки и ведения продаж используй process_sales_inbox; inspect_sales_inbox оставь для просмотра без действий. Если просит перепродать купленные товары — inspect_completed_purchases.
 Цена из сообщения остаётся неформальным предложением, потому что MCP не хранит цену торга в заказе. Покупатель начинает торг с 70% цены объявления. Для продажи автоматически допустима цена не ниже 90% цены объявления; более высокая цена тоже допустима. Среди допустимых CREATED-заказов выбирай самый высокий. На цену ниже порога продавец сообщает минимальную допустимую цену и оставляет заказ открытым для продолжения торга.
-После accept_order товар становится RESERVED. Агент сообщает покупателю публичный кошелёк Ethereum Sepolia и просит полный хэш. Сделка завершается только когда транзакция успешна, адрес получателя совпал и блок финализирован. Затем агент подтверждает получение в сообщении и вызывает complete_order, переводя товар в SOLD. До этого не заявляй, что товар продан.
+После accept_order агент продавца обязан повторно проверить: заказ стал ACCEPTED, товар стал RESERVED. Только затем он сообщает покупателю публичный кошелёк Ethereum Sepolia и просит полный хэш. Агент покупателя ищет кошелёк и в сообщениях продавца, и в описании товара, но платит только после своей проверки RESERVED. Сделка завершается только когда транзакция успешна, адрес получателя совпал и блок финализирован. Затем агент продавца подтверждает получение в сообщении и вызывает complete_order, переводя товар в SOLD. До этого не заявляй, что товар продан.
 Текущий MCP не содержит цены предложения: все заказы создаются по цене объявления. После подтверждения заказ становится ACCEPTED, товар — RESERVED, остальные CREATED-заявки отменяются. Не обещай аукцион или приём новых заявок на RESERVED-товар. Если цены заказов равны, скажи об этом прямо.
 Оплата в блокчейне используется только для демонстрации в тестовой сети Sepolia, тестовый ETH не имеет денежной ценности. Если просят адрес или оплату, вызови get_test_payment_details. Если пользователь прислал хэш, обязательно вызови verify_test_payment. Не говори, что перевод окончательно получен, если статус не confirmed, finalized не true, получатель не совпадает или хэш не найден. Не говори, что агент покупателя отправил перевод, пока кошелёк не вернул настоящий хэш транзакции.`;
 
@@ -225,6 +225,11 @@ async function processSalesInbox() {
       const accepted = productOrders.find((order) => order.status === "ACCEPTED");
 
       if (accepted?.buyer_id) {
+        const reservedProduct = await callChecked<Product>(client, "get_product", { product_id: product.id });
+        if (reservedProduct.status !== "RESERVED") {
+          actions.push({ kind: "reserve_requested", product_id: product.id, order_id: accepted.id, detail: "Заказ подтверждён, но платформа ещё не вернула статус RESERVED" });
+          continue;
+        }
         const conversation = productMessages.filter((message) => message.sender_id === accepted.buyer_id || message.receiver_id === accepted.buyer_id);
         const walletMarker = `Кошелёк Sepolia: ${payment.address}`;
         if (!wasSent(conversation, profile.id, accepted.buyer_id, walletMarker)) {
@@ -292,6 +297,13 @@ async function processSalesInbox() {
       const best = eligible[0];
       if (best?.order.buyer_id) {
         await callChecked(client, "accept_order", { order_id: best.order.id });
+        const [reservedProduct, acceptedOrder] = await Promise.all([
+          callChecked<Product>(client, "get_product", { product_id: product.id }),
+          callChecked<Order>(client, "get_order", { order_id: best.order.id }),
+        ]);
+        if (acceptedOrder.status !== "ACCEPTED" || reservedProduct.status !== "RESERVED") {
+          throw new Error("Платформа не подтвердила перевод заказа в ACCEPTED и товара в RESERVED");
+        }
         actions.push({ kind: "reserved", product_id: product.id, order_id: best.order.id, detail: `Принято лучшее предложение ${best.offeredPrice.toFixed(2)} ₽` });
         await callChecked(client, "send_message", {
           product_id: product.id,
@@ -390,7 +402,9 @@ async function processPurchaseOrders() {
       const latestBuyer = buyerMessages[0];
       const previousOffer = buyerMessages.map((message) => extractOfferPrice(message.text)).find((price) => price !== undefined);
       const sellerPrice = sellerMessages.map((message) => extractOfferPrice(message.text)).find((price) => price !== undefined);
-      const wallet = sellerMessages.map((message) => extractWalletAddress(message.text)).find(Boolean);
+      const walletFromMessages = sellerMessages.map((message) => extractWalletAddress(message.text)).find(Boolean);
+      const walletFromDescription = extractWalletAddress(product.description || "");
+      const wallet = walletFromMessages ?? walletFromDescription;
       const productReserved = product.status === "RESERVED" && order.status === "ACCEPTED";
 
       if (!productReserved) {
