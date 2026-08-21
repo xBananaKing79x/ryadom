@@ -107,6 +107,11 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(agentRoute, /completedOrder\.status !== "COMPLETED" && completedProduct\.status !== "SOLD"/);
   assert.match(agentRoute, /Ответ на сообщение покупателя/);
   assert.match(agentRoute, /Продавец отказался от сделки/);
+  assert.match(agentRoute, /replyMarker/);
+  assert.match(agentRoute, /get_messages", \{ product_id: productId, limit: 100 \}/);
+  assert.doesNotMatch(agentRoute, /get_messages", \{ product_id: productId, order_id: order\.id, limit: 100 \}/);
+  assert.match(agentRoute, /const sales = await processSalesInbox\(\)/);
+  assert.match(agentRoute, /const purchases = await processPurchaseOrders\(\)/);
   assert.match(agentRoute, /sendTestPayment\(wallet, amountToSend\)/);
   assert.match(agentRoute, /create_products_batch/);
   assert.match(agentRoute, /research_and_create_products/);
@@ -127,6 +132,9 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /agentChatRef/);
   assert.match(app, /chat\.scrollHeight/);
   assert.match(app, /setInterval\(\(\) => void tick\(\), 5_000\)/);
+  assert.match(app, /ryadom:agent-poll-lease/);
+  assert.match(app, /agentAutomationFailures/);
+  assert.match(app, /if \(!response\.ok\) throw new Error/);
   assert.match(app, /Новое сообщение по объявлению/);
   assert.match(app, /ryadom:agent-seen-message-ids/);
   assert.match(app, /agent-offer-product/);

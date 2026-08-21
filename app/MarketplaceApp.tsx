@@ -132,6 +132,8 @@ export function MarketplaceApp() {
   const agentDrag = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number; moved: boolean } | null>(null);
   const agentChatRef = useRef<HTMLDivElement | null>(null);
   const agentSeenMessageIds = useRef<Set<string> | null>(null);
+  const agentPollOwner = useRef("");
+  const agentAutomationFailures = useRef(0);
 
   const showToast = useCallback((text: string) => {
     setToast(text); if (toastTimer.current) clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(""), 3500);
@@ -219,12 +221,25 @@ export function MarketplaceApp() {
   useEffect(() => {
     let stopped = false;
     let running = false;
+    const leaseKey = "ryadom:agent-poll-lease";
+    if (!agentPollOwner.current) agentPollOwner.current = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const tick = async () => {
       if (stopped || running) return;
+      const now = Date.now();
+      try {
+        const lease = JSON.parse(localStorage.getItem(leaseKey) || "null") as { owner?: string; expires?: number } | null;
+        if (lease?.owner !== agentPollOwner.current && Number(lease?.expires) > now) return;
+        localStorage.setItem(leaseKey, JSON.stringify({ owner: agentPollOwner.current, expires: now + 9_000 }));
+      } catch { /* Если storage недоступен, текущая вкладка всё равно продолжит проверку. */ }
       running = true;
       try {
         const response = await fetch("/api/agent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ automation: "deals" }) });
-        const payload = await response.json() as { actions?: SaleAction[]; sales?: { offers?: AgentOffer[] } };
+        const payload = await response.json() as { actions?: SaleAction[]; sales?: { offers?: AgentOffer[] }; error?: string };
+        if (!response.ok) throw new Error(payload.error || "Автопроверка сделок временно недоступна");
+        if (agentAutomationFailures.current) {
+          agentAutomationFailures.current = 0;
+          setAgentError((current) => current.startsWith("Автопроверка сделок:") ? "" : current);
+        }
         if (!agentSeenMessageIds.current) {
           try { agentSeenMessageIds.current = new Set(JSON.parse(localStorage.getItem("ryadom:agent-seen-message-ids") || "[]") as string[]); }
           catch { agentSeenMessageIds.current = new Set(); }
@@ -246,12 +261,25 @@ export function MarketplaceApp() {
           void loadNotifications();
           void loadProducts();
         }
-      } catch { /* Автопроверка повторится через пять секунд. */ }
+      } catch (reason) {
+        agentAutomationFailures.current += 1;
+        if (agentAutomationFailures.current === 3) {
+          const message = reason instanceof Error ? reason.message : "соединение с площадкой прервано";
+          setAgentError(`Автопроверка сделок: ${message}. Агент продолжит попытки автоматически.`);
+          showToast("Агент временно не может проверить сделки");
+        }
+      }
       finally { running = false; }
     };
     void tick();
     const interval = setInterval(() => void tick(), 5_000);
-    return () => { stopped = true; clearInterval(interval); };
+    return () => {
+      stopped = true; clearInterval(interval);
+      try {
+        const lease = JSON.parse(localStorage.getItem(leaseKey) || "null") as { owner?: string } | null;
+        if (lease?.owner === agentPollOwner.current) localStorage.removeItem(leaseKey);
+      } catch { /* lease самостоятельно истечёт */ }
+    };
   }, [hydrateAgentOfferImages, loadNotifications, loadProducts, showToast]);
 
   useEffect(() => {

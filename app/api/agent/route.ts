@@ -281,6 +281,10 @@ function wasSent(messages: Message[], profileId: string, receiverId: string | un
   return messages.some((message) => message.sender_id === profileId && (!receiverId || message.receiver_id === receiverId) && message.text.includes(fragment));
 }
 
+function replyMarker(message: Message) {
+  return `Ответ агента · ${message.id.slice(0, 8)}`;
+}
+
 async function processSalesInbox() {
   return withMcp(async (client) => {
     const [profile, products, orders] = await Promise.all([
@@ -446,17 +450,19 @@ async function processSalesInbox() {
         if (message.sender_id && message.sender_id !== profile.id && !buyersWithoutOrder.has(message.sender_id)) buyersWithoutOrder.set(message.sender_id, message);
       }
       for (const [buyerId, message] of buyersWithoutOrder) {
+        if (productOrders.some((order) => order.buyer_id === buyerId)) continue;
+        const latestSellerMessage = productMessages.find((item) => item.sender_id === profile.id && item.receiver_id === buyerId);
+        if (messageTime(message) <= messageTime(latestSellerMessage)) continue;
+        const responseMarker = replyMarker(message);
+        if (wasSent(productMessages, profile.id, buyerId, responseMarker)) continue;
         const offeredPrice = extractOfferPrice(message.text);
         if (offeredPrice !== undefined && offeredPrice < minimumPrice) {
-          const marker = `минимально допустимая цена — ${minimumPrice.toFixed(2)} ₽`;
-          if (!wasSent(productMessages, profile.id, buyerId, marker)) {
-            await callChecked(client, "send_message", { product_id: product.id, receiver_id: buyerId, text: `Спасибо за предложение ${offeredPrice.toFixed(2)} ₽. Оно ниже допустимого порога: ${marker}. Если готовы повысить цену, напишите новое предложение.` });
-            actions.push({ kind: "rejected", product_id: product.id, detail: "Торг ниже порога отклонён в сообщениях" });
-          }
-        } else if (!wasSent(productMessages, profile.id, buyerId, "создайте заказ")) {
+          await callChecked(client, "send_message", { product_id: product.id, receiver_id: buyerId, text: `${responseMarker}. Спасибо за предложение ${offeredPrice.toFixed(2)} ₽. Оно ниже допустимого порога: минимально допустимая цена — ${minimumPrice.toFixed(2)} ₽. Если готовы повысить цену, напишите новое предложение.` });
+          actions.push({ kind: "rejected", product_id: product.id, detail: "Агент ответил на новое предложение ниже порога" });
+        } else {
           const agreed = offeredPrice ?? listedPrice;
-          await callChecked(client, "send_message", { product_id: product.id, receiver_id: buyerId, text: `Товар «${product.title}» доступен. Предложение ${agreed.toFixed(2)} ₽ подходит. Пожалуйста, создайте заказ — после этого агент зарезервирует товар и пришлёт реквизиты оплаты.` });
-          actions.push({ kind: "requested_order", product_id: product.id, detail: "Покупателю предложено создать заказ" });
+          await callChecked(client, "send_message", { product_id: product.id, receiver_id: buyerId, text: `${responseMarker}. Товар «${product.title}» доступен, предложение ${agreed.toFixed(2)} ₽ подходит. Чтобы агент мог подтвердить сделку и поставить товар в резерв, создайте заказ из карточки товара. После появления заказа агент продолжит автоматически.` });
+          actions.push({ kind: "requested_order", product_id: product.id, detail: "Агент ответил на новое сообщение и запросил создание заказа" });
         }
       }
     }
@@ -522,8 +528,13 @@ async function processPurchaseOrders() {
       const listedPrice = Number(product.price);
       if (!Number.isFinite(listedPrice) || listedPrice <= 0) continue;
       const sellerId = order.seller_id || product.seller_id;
-      const messages = await callChecked<Message[]>(client, "get_messages", { product_id: productId, order_id: order.id, limit: 100 }).catch(() => [] as Message[]);
-      const conversation = (Array.isArray(messages) ? messages : []).sort((left, right) => messageTime(right) - messageTime(left));
+      const messages = await callChecked<Message[]>(client, "get_messages", { product_id: productId, limit: 100 }).catch(() => [] as Message[]);
+      const conversation = (Array.isArray(messages) ? messages : []).filter((message) => {
+        if (message.order_id === order.id) return true;
+        if (message.sender_id === profile.id) return !sellerId || !message.receiver_id || message.receiver_id === sellerId;
+        if (sellerId && message.sender_id === sellerId) return !message.receiver_id || message.receiver_id === profile.id;
+        return false;
+      }).sort((left, right) => messageTime(right) - messageTime(left));
       const sellerMessages = conversation.filter((message) => message.sender_id && message.sender_id !== profile.id && (!sellerId || message.sender_id === sellerId));
       const buyerMessages = conversation.filter((message) => message.sender_id === profile.id);
       const transferredHashes = extractTransactionHashes(buyerMessages.filter((message) => /перевод|транзакц/i.test(message.text)));
@@ -584,10 +595,13 @@ async function processPurchaseOrders() {
       }
 
       if (!wallet || !paymentQuote) {
-        const marker = "пришлите номер кошелька Ethereum Sepolia и точный расчёт суммы ETH";
+        const baseMarker = "пришлите номер кошелька Ethereum Sepolia и точный расчёт суммы ETH";
+        const newSellerMessage = latestSeller && messageTime(latestSeller) > messageTime(latestBuyer) ? latestSeller : undefined;
+        const marker = newSellerMessage ? replyMarker(newSellerMessage) : baseMarker;
         if (!wasSent(conversation, profile.id, sellerId, marker)) {
-          await callChecked(client, "send_message", { product_id: productId, order_id: order.id, text: `Товар зарезервирован. Пожалуйста, ${marker}: цена объявления ${listedPrice.toFixed(2)} ₽, курс ETH/RUB и итоговая сумма должны быть зафиксированы в сообщении сделки.` });
-          actions.push({ kind: "wallet_requested", product_id: productId, order_id: order.id, detail: "У продавца запрошены кошелёк и расчёт ETH по цене объявления" });
+          const prefix = newSellerMessage ? `${marker}. Сообщение получено и проверено. ` : "Товар зарезервирован. ";
+          await callChecked(client, "send_message", { product_id: productId, order_id: order.id, text: `${prefix}Цена в карточке указана в рублях: ${listedPrice.toFixed(2)} ₽. Пожалуйста, ${baseMarker}: укажите этот рублёвый номинал, зафиксированный курс ETH/RUB и итоговую сумму ETH. Без согласованного расчёта агент не выполнит дополнительный перевод.` });
+          actions.push({ kind: "wallet_requested", product_id: productId, order_id: order.id, detail: newSellerMessage ? "Агент ответил на новое сообщение и запросил корректный расчёт ETH" : "У продавца запрошены кошелёк и расчёт ETH по цене объявления" });
         }
         continue;
       }
@@ -801,7 +815,8 @@ export async function POST(request: Request) {
     const body = await request.json() as { messages?: unknown; automation?: unknown };
     if (body.automation === "sales") return NextResponse.json(await processSalesInbox());
     if (body.automation === "deals") {
-      const [sales, purchases] = await Promise.all([processSalesInbox(), processPurchaseOrders()]);
+      const sales = await processSalesInbox();
+      const purchases = await processPurchaseOrders();
       return NextResponse.json({ actions: [...sales.actions, ...purchases.actions], sales, purchases });
     }
     const apiKey = process.env.DEEPSEEK_API_KEY;
