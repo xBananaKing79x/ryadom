@@ -13,6 +13,7 @@ type SaleAction = { kind: "requested_order" | "rejected" | "reserved" | "wallet_
 type ImageRecord = { id?: string; url?: string; alt_text?: string };
 type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown; isError?: boolean };
 type AgentMessage = { role: "user" | "assistant"; content: string };
+type PlatformStats = { listings: number; sellers: number; updated_at: string };
 type PaymentDetails = { network: "Ethereum Sepolia"; chain_id: number; address: string; currency: "SepoliaETH"; amount_eth: string; value_wei_hex: string; explorer_url: string; faucet_url: string; transaction?: { hash: string; status: "pending" | "confirmed" | "failed" | "not_found"; finalized: boolean; recipient_matches: boolean; amount_matches: boolean; expected_amount_eth: string; amount_eth?: string; block_number?: number; explorer_url: string } };
 type EthereumProvider = { request: (input: { method: string; params?: unknown[] }) => Promise<unknown> };
 type Panel = "profile" | "products" | "orders" | "messages" | "agent" | "product" | "create" | "edit" | null;
@@ -128,6 +129,8 @@ export function MarketplaceApp() {
   const [agentPayment, setAgentPayment] = useState<PaymentDetails | null>(null);
   const [paymentSending, setPaymentSending] = useState(false);
   const [agentButtonPosition, setAgentButtonPosition] = useState<{ x: number; y: number } | null>(null);
+  const [platformStats, setPlatformStats] = useState<PlatformStats | null>(null);
+  const [statsError, setStatsError] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const agentDrag = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number; moved: boolean } | null>(null);
   const agentChatRef = useRef<HTMLDivElement | null>(null);
@@ -217,6 +220,21 @@ export function MarketplaceApp() {
     const timer = setTimeout(() => void loadNotifications(), 600);
     return () => clearTimeout(timer);
   }, [loadNotifications]);
+
+  useEffect(() => {
+    let stopped = false;
+    const loadPlatformStats = async () => {
+      try {
+        const response = await fetch("/api/stats", { cache: "no-store" });
+        const payload = await response.json() as PlatformStats & { error?: string };
+        if (!response.ok) throw new Error(payload.error || "Статистика недоступна");
+        if (!stopped) { setPlatformStats(payload); setStatsError(false); }
+      } catch { if (!stopped) setStatsError(true); }
+    };
+    void loadPlatformStats();
+    const interval = setInterval(() => void loadPlatformStats(), 5 * 60 * 1000);
+    return () => { stopped = true; clearInterval(interval); };
+  }, []);
 
   useEffect(() => {
     let stopped = false;
@@ -700,6 +718,14 @@ export function MarketplaceApp() {
     </section>
 
     <section className="trust-band"><div><span className="trust-number">01</span><strong>Живые объявления</strong><p>Каталог обновляется напрямую с платформы.</p></div><div><span className="trust-number">02</span><strong>Диалог до сделки</strong><p>Задайте продавцу вопросы в личных сообщениях.</p></div><div><span className="trust-number">03</span><strong>Понятный заказ</strong><p>Создайте, подтвердите или отмените сделку.</p></div></section>
+    <section className="platform-stats" aria-labelledby="platform-stats-title">
+      <div className="platform-stats-copy"><p className="eyebrow">Платформа в цифрах</p><h2 id="platform-stats-title">«Рядом» растёт вместе с городом</h2><p>Актуальная статистика объявлений без снятых с публикации.</p></div>
+      <div className="platform-stats-grid" aria-live="polite">
+        <article><span aria-hidden="true">⌁</span><strong>{platformStats ? new Intl.NumberFormat("ru-RU").format(platformStats.listings) : "—"}</strong><p>объявлений</p></article>
+        <article><span aria-hidden="true">☺</span><strong>{platformStats ? new Intl.NumberFormat("ru-RU").format(platformStats.sellers) : "—"}</strong><p>продавцов</p></article>
+      </div>
+      <small>{statsError ? "Статистика обновится автоматически" : platformStats ? `Обновлено ${new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(new Date(platformStats.updated_at))} · обновляем каждые 5 минут` : "Собираем свежие данные…"}</small>
+    </section>
     <footer><a className="brand" href="#top"><span className="brand-mark">Р</span><span>рядом</span></a><span>Вещи меняют хозяев. Город становится ближе.</span><button onClick={() => { setSelected(null); setPanel("create"); }} type="button">Разместить объявление ↗</button></footer>
 
     {panel === "profile" && <Modal eyebrow="Личный кабинет" title="Ваш профиль" close={() => setPanel(null)}>{panelLoading ? <div className="panel-loader">Загружаем…</div> : profile ? <div className="profile-card"><div className="avatar">{profileName.charAt(0)}</div><div><h3>{profileName}</h3><p>На «Рядом» с {shortDate(profile.created_at)}</p><small>ID · {profile.id}</small></div></div> : <EmptyState title="Профиль недоступен" text={actionError || "Попробуйте открыть его снова."} />}</Modal>}

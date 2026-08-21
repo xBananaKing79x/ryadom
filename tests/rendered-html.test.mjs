@@ -22,8 +22,27 @@ test("server-renders the marketplace shell", async () => {
   assert.match(html, /Найдётся/);
   assert.match(html, /Что ищем сегодня/);
   assert.match(html, /Мои продукты/);
+  assert.match(html, /Платформа в цифрах/);
   assert.match(html, /src="\/hero-marketplace-v3\.png"/);
   assert.doesNotMatch(html, /MCP_API_TOKEN|c2c_6_/i);
+});
+
+test("shows cached live marketplace statistics", async () => {
+  const [route, app] = await Promise.all([
+    readFile(new URL("../app/api/stats/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/MarketplaceApp.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(route, /search_products/);
+  assert.match(route, /\["ACTIVE", "RESERVED", "SOLD"\]/);
+  assert.match(route, /next_cursor/);
+  assert.match(route, /sellerIds\.add/);
+  assert.match(route, /5 \* 60 \* 1000/);
+  assert.match(route, /RATE_LIMITED\|Too many MCP requests/);
+  assert.match(app, /fetch\("\/api\/stats"/);
+  assert.match(app, /setInterval\(\(\) => void loadPlatformStats\(\), 5 \* 60 \* 1000\)/);
+  assert.match(app, /platform-stats/);
+  assert.match(app, /объявлений/);
+  assert.match(app, /продавцов/);
 });
 
 test("keeps MCP writes server-side and explicitly allowlisted", async () => {
