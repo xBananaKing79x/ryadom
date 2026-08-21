@@ -112,6 +112,9 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /agentChatRef/);
   assert.match(app, /chat\.scrollHeight/);
   assert.match(app, /setInterval\(\(\) => void tick\(\), 5_000\)/);
+  assert.match(app, /Новое сообщение по объявлению/);
+  assert.match(app, /ryadom:agent-seen-message-ids/);
+  assert.match(app, /agent-offer-product/);
   assert.match(app, /order-product-image/);
   assert.match(app, /Открыть карточку →/);
   assert.match(app, /Провести покупки/);

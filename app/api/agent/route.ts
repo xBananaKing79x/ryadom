@@ -260,6 +260,10 @@ async function processSalesInbox() {
       const messages = await callChecked<Message[]>(client, "get_messages", { product_id: product.id, limit: 100 }).catch(() => [] as Message[]);
       const productMessages = Array.isArray(messages) ? messages : [];
       const productOrders = orderList.filter((order) => order.product_id === product.id && ["CREATED", "ACCEPTED"].includes(order.status));
+      for (const message of productMessages.filter((item) => item.sender_id && item.sender_id !== profile.id)) {
+        const relatedOrder = productOrders.find((order) => order.id === message.order_id || order.buyer_id === message.sender_id);
+        observedOffers.push({ message, product, order: relatedOrder, offered_price: extractOfferPrice(message.text) });
+      }
       const accepted = productOrders.find((order) => order.status === "ACCEPTED");
 
       if (accepted?.buyer_id) {
@@ -320,7 +324,6 @@ async function processSalesInbox() {
         const buyerMessages = productMessages.filter((message) => message.sender_id === order.buyer_id);
         const offeredPrice = buyerMessages.map((message) => extractOfferPrice(message.text)).find((value) => value !== undefined) ?? listedPrice;
         const message = buyerMessages[0];
-        if (message) observedOffers.push({ message, product, order, offered_price: offeredPrice });
         return { order, offeredPrice, message };
       }).sort((left, right) => right.offeredPrice - left.offeredPrice);
 
