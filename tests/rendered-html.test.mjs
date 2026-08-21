@@ -29,7 +29,7 @@ test("keeps MCP writes server-side and explicitly allowlisted", async () => {
   const [route, app, image] = await Promise.all([
     readFile(new URL("../app/api/mcp/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/MarketplaceApp.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../public/hero-marketplace-v2.png", import.meta.url)),
+    readFile(new URL("../public/hero-marketplace-v3.png", import.meta.url)),
   ]);
   assert.match(route, /const allowedTools = new Set/);
   assert.match(route, /"create_product"/);
