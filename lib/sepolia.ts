@@ -12,6 +12,7 @@ export type PaymentDetails = {
   transaction?: {
     hash: string;
     status: "pending" | "confirmed" | "failed" | "not_found";
+    finalized: boolean;
     recipient_matches: boolean;
     amount_eth?: string;
     block_number?: number;
@@ -44,28 +45,37 @@ export async function verifyTestPayment(hashValue: unknown): Promise<PaymentDeta
   if (!isHash(hash)) throw new Error("Нужен полный Ethereum-хэш вида 0x… длиной 66 символов");
   const details = getTestPaymentDetails();
   const rpcUrl = process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com";
-  const rpc = async (method: string) => {
+  const rpc = async (method: string, params: unknown[]) => {
     const response = await fetch(rpcUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: [hash] }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
     });
     if (!response.ok) throw new Error("Не удалось связаться с сетью Sepolia");
     const payload = await response.json() as { result?: Record<string, string> | null; error?: { message?: string } };
     if (payload.error) throw new Error(payload.error.message || "Sepolia RPC отклонил запрос");
     return payload.result || null;
   };
-  const [transaction, receipt] = await Promise.all([rpc("eth_getTransactionByHash"), rpc("eth_getTransactionReceipt")]);
+  const [transaction, receipt] = await Promise.all([
+    rpc("eth_getTransactionByHash", [hash]),
+    rpc("eth_getTransactionReceipt", [hash]),
+  ]);
   const explorerUrl = `https://sepolia.etherscan.io/tx/${hash}`;
-  if (!transaction) return { ...details, transaction: { hash, status: "not_found", recipient_matches: false, explorer_url: explorerUrl } };
+  if (!transaction) return { ...details, transaction: { hash, status: "not_found", finalized: false, recipient_matches: false, explorer_url: explorerUrl } };
   const recipientMatches = typeof transaction.to === "string" && transaction.to.toLowerCase() === details.address.toLowerCase();
   const value = typeof transaction.value === "string" ? transaction.value : undefined;
   const status = !receipt ? "pending" : receipt.status === "0x1" ? "confirmed" : "failed";
+  let finalized = false;
+  if (status === "confirmed" && receipt?.blockNumber) {
+    const finalizedBlock = await rpc("eth_getBlockByNumber", ["finalized", false]).catch(() => null);
+    finalized = Boolean(finalizedBlock?.number && BigInt(receipt.blockNumber) <= BigInt(finalizedBlock.number));
+  }
   return {
     ...details,
     transaction: {
       hash,
       status,
+      finalized,
       recipient_matches: recipientMatches,
       amount_eth: value ? formatEther(BigInt(value)) : undefined,
       block_number: receipt?.blockNumber ? Number(BigInt(receipt.blockNumber)) : undefined,
