@@ -67,6 +67,12 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(agentRoute, /inspect_sales_inbox/);
   assert.match(agentRoute, /inspect_completed_purchases/);
   assert.match(agentRoute, /extractOfferPrice/);
+  assert.match(agentRoute, /get_test_payment_details/);
+  assert.match(agentRoute, /verify_test_payment/);
+  assert.match(agentRoute, /eth_getTransactionReceipt/);
+  assert.match(agentRoute, /recipient_matches/);
+  assert.match(agentRoute, /SEPOLIA_PAYMENT_ADDRESS/);
+  assert.doesNotMatch(app, /SEPOLIA_PAYMENT_PRIVATE_KEY/);
   assert.doesNotMatch(app, /DEEPSEEK_API_KEY|api\.deepseek\.com/);
   assert.match(app, /Агент по покупкам/);
   assert.match(app, /floating-agent-button/);
@@ -82,4 +88,7 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /declineAgentOffer/);
   assert.match(app, /relistPurchasedProduct/);
   assert.match(app, /Выставлено на продажу/);
+  assert.match(app, /eth_sendTransaction/);
+  assert.match(app, /Тестовая оплата ETH/);
+  assert.match(app, /Проверить статус/);
 });

@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { NextResponse } from "next/server";
+import { formatEther, getAddress, isAddress, isHash } from "viem";
 
 export const dynamic = "force-dynamic";
 
@@ -12,9 +13,45 @@ type Product = { id: string; title: string; description?: string; price: number 
 type Order = { id: string; product_id?: string; status: string; product?: Product; created_at?: string; buyer_id?: string; seller_id?: string };
 type Message = { id: string; product_id?: string; order_id?: string; sender_id?: string; receiver_id?: string; text: string; created_at?: string };
 type AgentOffer = { message: Message; product: Product; order?: Order; offered_price?: number };
+type PaymentDetails = { network: "Sepolia"; chain_id: 11155111; address: string; amount_eth: string; value_wei_hex: string; explorer_url: string; faucet_url: string; transaction?: { hash: string; status: "pending" | "confirmed" | "failed" | "not_found"; recipient_matches: boolean; amount_eth?: string; block_number?: number; explorer_url: string } };
 
 const mcpEndpoint = process.env.MCP_SERVER_URL || "https://ai-hackaton.ru/mcp";
 const allowedAgentTools = new Set(["search_products", "get_product", "get_my_products", "get_my_orders"]);
+const sepoliaChainId = 11155111 as const;
+const sepoliaAmountEth = "0.0001";
+const sepoliaValueWeiHex = "0x5af3107a4000";
+
+function paymentAddress() {
+  const value = process.env.SEPOLIA_PAYMENT_ADDRESS || "";
+  if (!isAddress(value)) throw new Error("Тестовый платёжный адрес пока не настроен");
+  return getAddress(value);
+}
+
+function getTestPaymentDetails(): PaymentDetails {
+  const address = paymentAddress();
+  return { network: "Sepolia", chain_id: sepoliaChainId, address, amount_eth: sepoliaAmountEth, value_wei_hex: sepoliaValueWeiHex, explorer_url: `https://sepolia.etherscan.io/address/${address}`, faucet_url: "https://ethereum.org/developers/docs/networks/#sepolia" };
+}
+
+async function verifyTestPayment(hashValue: unknown): Promise<PaymentDetails> {
+  const hash = typeof hashValue === "string" ? hashValue.trim() : "";
+  if (!isHash(hash)) throw new Error("Нужен полный Ethereum-хэш вида 0x… длиной 66 символов");
+  const details = getTestPaymentDetails();
+  const rpcUrl = process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com";
+  const rpc = async (method: string) => {
+    const response = await fetch(rpcUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: [hash] }) });
+    if (!response.ok) throw new Error("Не удалось связаться с сетью Sepolia");
+    const payload = await response.json() as { result?: Record<string, string> | null; error?: { message?: string } };
+    if (payload.error) throw new Error(payload.error.message || "Sepolia RPC отклонил запрос");
+    return payload.result || null;
+  };
+  const [transaction, receipt] = await Promise.all([rpc("eth_getTransactionByHash"), rpc("eth_getTransactionReceipt")]);
+  const explorerUrl = `https://sepolia.etherscan.io/tx/${hash}`;
+  if (!transaction) return { ...details, transaction: { hash, status: "not_found", recipient_matches: false, explorer_url: explorerUrl } };
+  const recipientMatches = typeof transaction.to === "string" && transaction.to.toLowerCase() === details.address.toLowerCase();
+  const value = typeof transaction.value === "string" ? transaction.value : undefined;
+  const status = !receipt ? "pending" : receipt.status === "0x1" ? "confirmed" : "failed";
+  return { ...details, transaction: { hash, status, recipient_matches: recipientMatches, amount_eth: value ? formatEther(BigInt(value)) : undefined, block_number: receipt?.blockNumber ? Number(BigInt(receipt.blockNumber)) : undefined, explorer_url: explorerUrl } };
+}
 
 const tools = [
   {
@@ -76,6 +113,22 @@ const tools = [
       parameters: { type: "object", properties: {} },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_test_payment_details",
+      description: "Показать реквизиты тестовой оплаты в Ethereum Sepolia. Возвращает адрес, фиксированную тестовую сумму и ссылку на explorer.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "verify_test_payment",
+      description: "Проверить состояние тестовой Sepolia-транзакции по полному хэшу, адрес получателя и сумму.",
+      parameters: { type: "object", properties: { transaction_hash: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$" } }, required: ["transaction_hash"] },
+    },
+  },
 ];
 
 const systemPrompt = `Ты — агент C2C-маркетплейса «Рядом». Отвечай по-русски, коротко и дружелюбно.
@@ -86,7 +139,8 @@ ACTIVE — доступен для покупки, RESERVED — товар на 
 Ты не выполняешь денежные или изменяющие состояние действия самостоятельно. Карточки интерфейса дадут пользователю кнопки создания и подтверждения заказа.
 Если пользователь просит проверить сообщения, торг или предложения покупателей, обязательно вызови inspect_sales_inbox. Если просит перепродать купленные товары — inspect_completed_purchases.
 Цена, написанная покупателем в сообщении, является неформальным предложением. Никогда не называй её ценой заказа. Если она ниже цены объявления, предложи продавцу резерв и отдельное согласование; не заявляй, что продажа подтверждена.
-Текущий MCP не содержит цены предложения: все заказы создаются по цене объявления. После подтверждения заказ становится ACCEPTED, товар — RESERVED, остальные CREATED-заявки отменяются. Не обещай аукцион или приём новых заявок на RESERVED-товар. Если цены заказов равны, скажи об этом прямо.`;
+Текущий MCP не содержит цены предложения: все заказы создаются по цене объявления. После подтверждения заказ становится ACCEPTED, товар — RESERVED, остальные CREATED-заявки отменяются. Не обещай аукцион или приём новых заявок на RESERVED-товар. Если цены заказов равны, скажи об этом прямо.
+Оплата в блокчейне используется только для демонстрации в тестовой сети Sepolia, тестовый ETH не имеет денежной ценности. Если просят адрес или оплату, вызови get_test_payment_details. Если пользователь прислал хэш, обязательно вызови verify_test_payment. Не говори, что перевод подтверждён, если статус не confirmed, получатель не совпадает или хэш не найден. Не говори, что агент отправил перевод, пока интерфейс кошелька не вернул настоящий хэш транзакции.`;
 
 function unwrap<T>(result: McpResult): T {
   const structured = result.structuredContent as Record<string, unknown> | undefined;
@@ -154,6 +208,8 @@ async function inspectCompletedPurchases() {
 async function callAgentTool(name: string, args: Record<string, unknown>) {
   if (name === "inspect_sales_inbox") return inspectSalesInbox();
   if (name === "inspect_completed_purchases") return inspectCompletedPurchases();
+  if (name === "get_test_payment_details") return getTestPaymentDetails();
+  if (name === "verify_test_payment") return verifyTestPayment(args.transaction_hash);
   if (!allowedAgentTools.has(name)) throw new Error("Инструмент агенту недоступен");
   return withMcp((client) => callChecked<unknown>(client, name, args));
 }
@@ -189,6 +245,7 @@ export async function POST(request: Request) {
     let foundOrders: Order[] = [];
     let foundOffers: AgentOffer[] = [];
     let relistCandidates: Product[] = [];
+    let payment: PaymentDetails | undefined;
     let finalText = "Не получилось сформировать ответ. Попробуйте уточнить запрос.";
 
     for (let step = 0; step < 5; step += 1) {
@@ -227,6 +284,7 @@ export async function POST(request: Request) {
             const inspected = value as { products?: Product[] };
             relistCandidates = await hydrateProducts(Array.isArray(inspected.products) ? inspected.products : []);
           }
+          if ((call.function.name === "get_test_payment_details" || call.function.name === "verify_test_payment") && value && typeof value === "object") payment = value as PaymentDetails;
           messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(value).slice(0, 24000) });
         } catch (reason) {
           messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: safeError(reason) }) });
@@ -234,7 +292,7 @@ export async function POST(request: Request) {
       }
     }
 
-    return NextResponse.json({ message: finalText, products: foundProducts, orders: foundOrders, offers: foundOffers, relist_candidates: relistCandidates });
+    return NextResponse.json({ message: finalText, products: foundProducts, orders: foundOrders, offers: foundOffers, relist_candidates: relistCandidates, payment });
   } catch (reason) {
     return NextResponse.json({ error: safeError(reason) }, { status: 502 });
   }
