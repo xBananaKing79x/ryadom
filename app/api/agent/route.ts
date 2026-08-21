@@ -11,15 +11,16 @@ type DeepSeekMessage = { role: "system" | "user" | "assistant" | "tool"; content
 type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown; isError?: boolean };
 type Product = { id: string; title: string; description?: string; price: number | string; category: string; status?: string; seller_id?: string; image?: string };
 type Profile = { id: string; first_name?: string; last_name?: string };
-type Order = { id: string; product_id?: string; status: string; product?: Product; created_at?: string; buyer_id?: string; seller_id?: string };
+type Order = { id: string; product_id?: string; status: string; product?: Product; created_at?: string; buyer_id?: string; seller_id?: string; buyer_profile?: Profile };
 type Message = { id: string; product_id?: string; order_id?: string; sender_id?: string; receiver_id?: string; text: string; created_at?: string };
-type AgentOffer = { message: Message; product: Product; order?: Order; offered_price?: number };
+type AgentOffer = { message: Message; product: Product; order?: Order; offered_price?: number; sender_profile?: Profile };
 type ListingInput = { title: string; description: string; price: number; category: Product["category"] };
 type WebListingRequest = { product_name: string; condition?: string; notes?: string; category?: Product["category"] };
 type SaleAction = { kind: "requested_order" | "rejected" | "reserved" | "wallet_sent" | "payment_pending" | "payment_invalid" | "sold" | "buyer_offer" | "reserve_requested" | "wallet_requested" | "payment_sent"; product_id: string; order_id?: string; detail: string };
 
 const mcpEndpoint = process.env.MCP_SERVER_URL || "https://ai-hackaton.ru/mcp";
 const allowedAgentTools = new Set(["search_products", "get_product", "get_my_products", "get_my_orders"]);
+const participantProfileCache = new Map<string, { profile: Profile; expires_at: number }>();
 
 const tools = [
   {
@@ -259,6 +260,29 @@ function extractOfferPrice(text: string) {
   return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+async function attachParticipantProfiles(client: Client, offers: AgentOffer[], orders: Order[]) {
+  const ids = [...new Set([
+    ...offers.map((offer) => offer.message.sender_id),
+    ...orders.map((order) => order.buyer_id),
+  ].filter((id): id is string => Boolean(id)))].slice(0, 30);
+  const profiles = new Map<string, Profile>();
+  for (const id of ids) {
+    const cached = participantProfileCache.get(id);
+    if (cached && cached.expires_at > Date.now()) { profiles.set(id, cached.profile); continue; }
+    try {
+      const profile = await callChecked<Profile>(client, "get_profile", { user_id: id });
+      if (profile?.id) {
+        profiles.set(id, profile);
+        participantProfileCache.set(id, { profile, expires_at: Date.now() + 5 * 60 * 1000 });
+      }
+    } catch { /* Имя необязательно для выполнения сделки. */ }
+  }
+  return {
+    offers: offers.map((offer) => ({ ...offer, sender_profile: offer.message.sender_id ? profiles.get(offer.message.sender_id) : undefined })),
+    orders: orders.map((order) => ({ ...order, buyer_profile: order.buyer_id ? profiles.get(order.buyer_id) : undefined })),
+  };
+}
+
 async function inspectSalesInbox() {
   return withMcp(async (client) => {
     const profile = await callChecked<{ id: string }>(client, "get_my_profile");
@@ -274,7 +298,8 @@ async function inspectSalesInbox() {
       });
     }));
     const offers = batches.flat().sort((left, right) => String(right.message.created_at || "").localeCompare(String(left.message.created_at || "")));
-    return { offers: offers.slice(0, 30), products: productList, orders: orderList };
+    const participants = await attachParticipantProfiles(client, offers.slice(0, 30), orderList);
+    return { offers: participants.offers, products: productList, orders: participants.orders };
   });
 }
 
@@ -500,7 +525,8 @@ async function processSalesInbox() {
       }
     }
 
-    return { actions, offers: observedOffers.slice(0, 30), products: productList, orders: orderList };
+    const participants = await attachParticipantProfiles(client, observedOffers.slice(0, 30), orderList);
+    return { actions, offers: participants.offers, products: productList, orders: participants.orders };
   });
 }
 

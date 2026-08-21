@@ -5,10 +5,10 @@ import { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent, ReactNode,
 
 type Product = { id: string; seller_id?: string; title: string; description?: string; price: number | string; category: string; status?: string; created_at?: string; image?: string };
 type Profile = { id: string; first_name?: string; last_name?: string; name?: string; surname?: string; display_name?: string; created_at?: string };
-type Order = { id: string; product_id?: string; product?: Product; buyer_id?: string; seller_id?: string; status: string; created_at?: string };
+type Order = { id: string; product_id?: string; product?: Product; buyer_id?: string; seller_id?: string; status: string; created_at?: string; buyer_profile?: Profile };
 type Message = { id: string; sender_id?: string; receiver_id?: string; text: string; created_at?: string; product_id?: string; order_id?: string };
 type InboxMessage = Message & { product_id: string; productTitle: string };
-type AgentOffer = { message: Message; product: Product; order?: Order; offered_price?: number };
+type AgentOffer = { message: Message; product: Product; order?: Order; offered_price?: number; sender_profile?: Profile };
 type SaleAction = { kind: "requested_order" | "rejected" | "reserved" | "wallet_sent" | "payment_pending" | "payment_invalid" | "sold" | "buyer_offer" | "reserve_requested" | "wallet_requested" | "payment_sent"; product_id: string; order_id?: string; detail: string };
 type ImageRecord = { id?: string; url?: string; alt_text?: string };
 type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown; isError?: boolean };
@@ -69,6 +69,10 @@ function money(value: Product["price"]) {
 function shortDate(value?: string) {
   if (!value) return "";
   return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", year: "numeric" }).format(new Date(value));
+}
+
+function fullProfileName(participant?: Profile) {
+  return participant?.display_name?.trim() || [participant?.first_name || participant?.name, participant?.last_name || participant?.surname].filter(Boolean).join(" ").trim();
 }
 
 async function filePayload(file: File) {
@@ -161,7 +165,7 @@ export function MarketplaceApp() {
       try {
         const response = await mcpCall<Profile & { profile?: Profile; user?: Profile }>("get_profile", { user_id: id });
         const participant = response.profile || response.user || response;
-        const name = participant.display_name?.trim() || [participant.first_name || participant.name, participant.last_name || participant.surname].filter(Boolean).join(" ").trim();
+        const name = fullProfileName(participant);
         if (name) entries.push([id, name] as const);
       } catch { /* Временную ошибку не кэшируем: следующая проверка повторит запрос профиля. */ }
     }
@@ -174,6 +178,22 @@ export function MarketplaceApp() {
   const hydrateMessageProfiles = useCallback(async (list: Message[]) => {
     await hydrateParticipantProfiles(list.map((message) => message.sender_id));
   }, [hydrateParticipantProfiles]);
+
+  const rememberAgentProfiles = useCallback((offers: AgentOffer[], orders: Order[] = []) => {
+    const entries: Array<readonly [string, string]> = [];
+    for (const offer of offers) {
+      const name = fullProfileName(offer.sender_profile);
+      if (offer.message.sender_id && name) entries.push([offer.message.sender_id, name] as const);
+    }
+    for (const order of orders) {
+      const name = fullProfileName(order.buyer_profile);
+      if (order.buyer_id && name) entries.push([order.buyer_id, name] as const);
+    }
+    if (!entries.length) return;
+    const names = Object.fromEntries(entries);
+    Object.assign(participantNameCache.current, names);
+    setParticipantNames((current) => ({ ...current, ...names }));
+  }, []);
 
   const hydrateImages = useCallback(async (list: Product[], target: "catalog" | "mine" | "selling" = "catalog") => {
     await Promise.all(list.slice(0, 16).map(async (product) => {
@@ -315,16 +335,18 @@ export function MarketplaceApp() {
         }
         const inbound = Array.isArray(payload.sales?.offers) ? payload.sales.offers : [];
         if (!stopped && inbound.length) {
+          rememberAgentProfiles(inbound);
           setAgentOffers(inbound);
           void hydrateAgentOfferImages(inbound);
-          await hydrateMessageProfiles(inbound.map((offer) => offer.message));
+          const withoutProfile = inbound.filter((offer) => !fullProfileName(offer.sender_profile));
+          if (withoutProfile.length) await hydrateMessageProfiles(withoutProfile.map((offer) => offer.message));
         }
         const unseen = inbound.filter((offer) => !agentSeenMessageIds.current?.has(offer.message.id));
         if (!stopped && unseen.length) {
           unseen.forEach((offer) => agentSeenMessageIds.current?.add(offer.message.id));
           const remembered = [...(agentSeenMessageIds.current || [])].slice(-200);
           localStorage.setItem("ryadom:agent-seen-message-ids", JSON.stringify(remembered));
-          const notices = unseen.slice(0, 5).reverse().map((offer): AgentMessage => ({ role: "assistant", content: `Новое сообщение от ${offer.message.sender_id ? participantNameCache.current[offer.message.sender_id] || "собеседника" : "собеседника"} по объявлению «${offer.product.title}»:\n${offer.message.text}` }));
+          const notices = unseen.slice(0, 5).reverse().map((offer): AgentMessage => ({ role: "assistant", content: `Новое сообщение от ${fullProfileName(offer.sender_profile) || (offer.message.sender_id ? participantNameCache.current[offer.message.sender_id] : "") || "собеседника"} по объявлению «${offer.product.title}»:\n${offer.message.text}` }));
           setAgentMessages((current) => [...current, ...notices].slice(-18));
         }
         const materialActions = Array.isArray(payload.actions) ? payload.actions.filter((action) => action.kind !== "payment_pending") : [];
@@ -352,7 +374,7 @@ export function MarketplaceApp() {
         if (lease?.owner === agentPollOwner.current) localStorage.removeItem(leaseKey);
       } catch { /* lease самостоятельно истечёт */ }
     };
-  }, [hydrateAgentOfferImages, hydrateMessageProfiles, loadNotifications, loadProducts, showToast]);
+  }, [hydrateAgentOfferImages, hydrateMessageProfiles, loadNotifications, loadProducts, rememberAgentProfiles, showToast]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -515,8 +537,8 @@ export function MarketplaceApp() {
       if (!response.ok) throw new Error(payload.error || "Агент временно недоступен");
       setAgentMessages((current) => [...current, { role: "assistant", content: payload.message || "Готово." }].slice(-18));
       if (Array.isArray(payload.products) && payload.products.length) { setAgentProducts(payload.products); setAgentOrders([]); }
-      if (Array.isArray(payload.orders) && payload.orders.length) { setAgentOrders(payload.orders); setAgentProducts([]); void hydrateParticipantProfiles(payload.orders.map((order) => order.buyer_id)); void hydrateAgentOrderImages(payload.orders); }
-      if (Array.isArray(payload.offers)) { setAgentOffers(payload.offers); void hydrateMessageProfiles(payload.offers.map((offer) => offer.message)); if (payload.offers.length) { setAgentProducts([]); setAgentOrders([]); setAgentRelistCandidates([]); } }
+      if (Array.isArray(payload.orders) && payload.orders.length) { rememberAgentProfiles([], payload.orders); setAgentOrders(payload.orders); setAgentProducts([]); const withoutProfile = payload.orders.filter((order) => !fullProfileName(order.buyer_profile)); void hydrateParticipantProfiles(withoutProfile.map((order) => order.buyer_id)); void hydrateAgentOrderImages(payload.orders); }
+      if (Array.isArray(payload.offers)) { rememberAgentProfiles(payload.offers); setAgentOffers(payload.offers); const withoutProfile = payload.offers.filter((offer) => !fullProfileName(offer.sender_profile)); void hydrateMessageProfiles(withoutProfile.map((offer) => offer.message)); if (payload.offers.length) { setAgentProducts([]); setAgentOrders([]); setAgentRelistCandidates([]); } }
       if (Array.isArray(payload.relist_candidates)) { setAgentRelistCandidates(payload.relist_candidates); if (payload.relist_candidates.length) { setAgentProducts([]); setAgentOrders([]); setAgentOffers([]); } }
       if (payload.payment) setAgentPayment(payload.payment);
     } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось выполнить задачу"); }

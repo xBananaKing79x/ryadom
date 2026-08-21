@@ -70,7 +70,7 @@ test("keeps MCP writes server-side and explicitly allowlisted", async () => {
   assert.match(app, /response\.profile \|\| response\.user \|\| response/);
   assert.match(app, /Временную ошибку не кэшируем/);
   assert.match(app, /Новое сообщение от/);
-  assert.match(app, /Загружаем профиль…/);
+  assert.match(app, /rememberAgentProfiles/);
   assert.match(app, /participantNames\[order\.buyer_id\]/);
   assert.match(app, /agent-order-product/);
   assert.match(app, /Заказчик/);
@@ -102,6 +102,11 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(agentRoute, /get_my_orders/);
   assert.match(agentRoute, /inspect_sales_inbox/);
   assert.match(agentRoute, /process_sales_inbox/);
+  assert.match(agentRoute, /attachParticipantProfiles/);
+  assert.match(agentRoute, /sender_profile/);
+  assert.match(agentRoute, /buyer_profile/);
+  assert.match(agentRoute, /participantProfileCache/);
+  assert.match(agentRoute, /callChecked<Profile>\(client, "get_profile", \{ user_id: id \}\)/);
   assert.match(agentRoute, /start_purchase/);
   assert.match(agentRoute, /process_purchase_orders/);
   assert.match(agentRoute, /name: "reject_order"/);
