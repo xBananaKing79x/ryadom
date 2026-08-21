@@ -93,6 +93,8 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /event\.key === "Enter"/);
   assert.match(app, /!event\.shiftKey/);
   assert.match(app, /requestSubmit\(\)/);
+  assert.match(app, /agentChatRef/);
+  assert.match(app, /chat\.scrollHeight/);
   assert.match(app, /createAgentOrder/);
   assert.match(app, /acceptAgentOrder/);
   assert.match(app, /reserveAgentOffer/);

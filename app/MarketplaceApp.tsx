@@ -130,6 +130,7 @@ export function MarketplaceApp() {
   const [agentButtonPosition, setAgentButtonPosition] = useState<{ x: number; y: number } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const agentDrag = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number; moved: boolean } | null>(null);
+  const agentChatRef = useRef<HTMLDivElement | null>(null);
 
   const showToast = useCallback((text: string) => {
     setToast(text); if (toastTimer.current) clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(""), 3500);
@@ -225,6 +226,15 @@ export function MarketplaceApp() {
     } catch { /* Оставляем кнопку в позиции по умолчанию. */ }
     return () => { if (timer) clearTimeout(timer); };
   }, []);
+
+  useEffect(() => {
+    if (panel !== "agent") return;
+    const frame = requestAnimationFrame(() => {
+      const chat = agentChatRef.current;
+      if (chat) chat.scrollTo({ top: chat.scrollHeight, behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [agentMessages, agentSending, panel]);
 
   useEffect(() => {
     if (panel !== "product" || !selected) return;
@@ -627,7 +637,7 @@ export function MarketplaceApp() {
 
     {panel === "agent" && <Modal eyebrow="DeepSeek × MCP" title="Агент по сделкам" wide close={() => setPanel(null)}><div className="agent-shell">
       <aside className="agent-aside"><div className="agent-orb" aria-hidden="true">✦</div><strong>Что поручить?</strong><p>Агент ищет товары, общается с контрагентами и ведёт разрешённые сделки по заданным правилам.</p><div className="agent-prompts"><button onClick={() => void runAgentTask("Хочу найти товар. Спроси у меня категорию, бюджет и важные параметры.")} type="button">Найти товар</button><button onClick={() => void runAgentTask("Найди товары в статусе RESERVED — на холде. Сначала уточни, что именно искать.")} type="button">Поиск на холде</button><button onClick={() => void runAgentTask("Автономно обработай все текущие продажи: сообщения, торг, заказы, резерв и финализированные оплаты по правилу 90%.")} type="button">Провести продажи</button><button onClick={() => void runAgentTask("Проверь входящие сообщения по моим товарам без изменения заказов.")} type="button">Только проверить</button><button onClick={() => void runAgentTask("Покажи завершённые покупки, которые можно выставить на продажу с наценкой 15%.")} type="button">Перепродать +15%</button><button onClick={() => void runAgentTask("Покажи реквизиты для тестовой оплаты в Ethereum Sepolia.")} type="button">Тестовая оплата ETH</button></div><small>Продажи агент проводит автономно: принимает предложения от 90% цены и завершает только финализированную оплату.</small></aside>
-      <section className="agent-workspace"><div className="agent-chat" aria-live="polite">{agentMessages.map((message, index) => <article className={`agent-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "assistant" ? "Р" : "Вы"}</span><p>{message.content}</p></article>)}{agentSending && <article className="agent-message assistant thinking"><span>Р</span><p>Ищу и сравниваю…</p></article>}</div>
+      <section className="agent-workspace"><div className="agent-chat" aria-live="polite" aria-relevant="additions" ref={agentChatRef} role="log">{agentMessages.map((message, index) => <article className={`agent-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "assistant" ? "Р" : "Вы"}</span><p>{message.content}</p></article>)}{agentSending && <article className="agent-message assistant thinking"><span>Р</span><p>Ищу и сравниваю…</p></article>}</div>
         {agentError && <p className="inline-error">{agentError}</p>}
         {agentPayment && <div className="agent-payment"><div className="agent-payment-head"><div><span>Тестовая сеть</span><strong>Ethereum Sepolia</strong></div><i>не реальные деньги</i></div><div className="agent-payment-address"><small>Кошелёк получателя</small><code>{agentPayment.address}</code></div><div className="agent-payment-meta"><span>Сумма <strong>{agentPayment.amount_eth} SepoliaETH</strong></span><a href={agentPayment.explorer_url} target="_blank" rel="noreferrer">Кошелёк в Etherscan ↗</a></div>{agentPayment.transaction && <div className={`agent-payment-status status-${agentPayment.transaction.status}`}><span>{agentPayment.transaction.status === "confirmed" ? agentPayment.transaction.finalized ? "✓ Финализировано" : "◌ Подтверждено, ждём финализации" : agentPayment.transaction.status === "failed" ? "× Ошибка" : agentPayment.transaction.status === "not_found" ? "? Не найдено" : "◌ Ожидает подтверждения"}</span><code>{agentPayment.transaction.hash}</code><a href={agentPayment.transaction.explorer_url} target="_blank" rel="noreferrer">Открыть транзакцию ↗</a>{!agentPayment.transaction.recipient_matches && <strong>Адрес получателя не совпадает</strong>}</div>}<div className="agent-payment-actions"><button disabled={paymentSending} onClick={() => void sendSepoliaPayment()} type="button">{paymentSending ? "Откройте кошелёк…" : "Оплатить через кошелёк"}</button>{agentPayment.transaction && <button disabled={agentSending} onClick={() => void runAgentTask(`Проверь статус тестовой Sepolia-транзакции ${agentPayment.transaction?.hash}`)} type="button">Проверить статус</button>}<a href={agentPayment.faucet_url} target="_blank" rel="noreferrer">Где взять тестовый ETH</a></div></div>}
         {agentProducts.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Найденные предложения</strong><span>{agentProducts.length}</span></div><div className="agent-product-strip">{agentProducts.map((product) => <article className="agent-product-card" key={product.id}><button className={`agent-product-image category-${product.category}`} onClick={() => void openProduct(product)} type="button">{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Товар"}</span>}<i>{statusNames[product.status || "ACTIVE"] || product.status}</i></button><div><small>{categoryNames[product.category] || product.category}</small><h3>{product.title}</h3><strong>{money(product.price)}</strong><div className="agent-card-actions"><button onClick={() => void openProduct(product)} type="button">Карточка</button>{product.status === "ACTIVE" && <button disabled={acting} onClick={() => void createAgentOrder(product)} type="button">Создать заказ</button>}</div></div></article>)}</div></div>}
