@@ -12,7 +12,7 @@ type AgentOffer = { message: Message; product: Product; order?: Order; offered_p
 type ImageRecord = { id?: string; url?: string; alt_text?: string };
 type McpResult = { content?: Array<{ type: string; text?: string }>; structuredContent?: unknown; isError?: boolean };
 type AgentMessage = { role: "user" | "assistant"; content: string };
-type PaymentDetails = { network: "Sepolia"; chain_id: number; address: string; amount_eth: string; value_wei_hex: string; explorer_url: string; faucet_url: string; transaction?: { hash: string; status: "pending" | "confirmed" | "failed" | "not_found"; recipient_matches: boolean; amount_eth?: string; block_number?: number; explorer_url: string } };
+type PaymentDetails = { network: "Ethereum Sepolia"; chain_id: number; address: string; currency: "SepoliaETH"; amount_eth: string; value_wei_hex: string; explorer_url: string; faucet_url: string; transaction?: { hash: string; status: "pending" | "confirmed" | "failed" | "not_found"; recipient_matches: boolean; amount_eth?: string; block_number?: number; explorer_url: string } };
 type EthereumProvider = { request: (input: { method: string; params?: unknown[] }) => Promise<unknown> };
 type Panel = "profile" | "products" | "orders" | "messages" | "agent" | "product" | "create" | "edit" | null;
 
@@ -106,6 +106,9 @@ export function MarketplaceApp() {
   const [orderRole, setOrderRole] = useState("all");
   const [selected, setSelected] = useState<Product | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [dealMessages, setDealMessages] = useState<Message[]>([]);
+  const [dealPayment, setDealPayment] = useState<PaymentDetails | null>(null);
+  const [dealLoading, setDealLoading] = useState(false);
   const [inboxMessages, setInboxMessages] = useState<InboxMessage[]>([]);
   const [readMessageIds, setReadMessageIds] = useState<string[]>([]);
   const [notificationOpen, setNotificationOpen] = useState(false);
@@ -199,6 +202,29 @@ export function MarketplaceApp() {
     return () => { if (timer) clearTimeout(timer); };
   }, []);
 
+  useEffect(() => {
+    if (panel !== "product" || !selected) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setDealMessages([]); setDealPayment(null); setDealLoading(true); setActionError("");
+      void Promise.allSettled([
+        mcpCall<Message[]>("get_messages", { product_id: selected.id, limit: 100 }),
+        fetch("/api/ethereum").then(async (response) => {
+          const payload = await response.json() as { payment?: PaymentDetails; error?: string };
+          if (!response.ok || !payload.payment) throw new Error(payload.error || "Реквизиты сделки недоступны");
+          return payload.payment;
+        }),
+      ]).then(([messageResult, paymentResult]) => {
+        if (cancelled) return;
+        if (messageResult.status === "fulfilled") setDealMessages(Array.isArray(messageResult.value) ? messageResult.value : []);
+        if (paymentResult.status === "fulfilled") setDealPayment(paymentResult.value);
+        if (messageResult.status === "rejected" && paymentResult.status === "rejected") setActionError("Не удалось загрузить данные сделки");
+        setDealLoading(false);
+      });
+    }, 0);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [panel, selected]);
+
   function saveReadMessages(ids: string[]) {
     const unique = [...new Set(ids)].slice(-500);
     setReadMessageIds(unique);
@@ -249,6 +275,36 @@ export function MarketplaceApp() {
       if (next.receiverId) args.participant_id = next.receiverId; if (next.orderId) args.order_id = next.orderId;
       const list = await mcpCall<Message[]>("get_messages", args); setMessages(Array.isArray(list) ? list : []);
     } catch (reason) { setActionError(reason instanceof Error ? reason.message : "Не удалось загрузить сообщения"); } finally { setPanelLoading(false); }
+  }
+
+  function openProduct(product: Product) { setSelected(product); setPanel("product"); }
+
+  async function sendDealMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selected) return;
+    const formElement = event.currentTarget; const text = String(new FormData(formElement).get("deal_message") || "").trim();
+    if (!text) return;
+    setActing(true); setActionError("");
+    try {
+      const args: Record<string, unknown> = { product_id: selected.id, text };
+      if (selected.seller_id) args.receiver_id = selected.seller_id;
+      await mcpCall("send_message", args); formElement.reset();
+      const list = await mcpCall<Message[]>("get_messages", { product_id: selected.id, limit: 100 });
+      setDealMessages(Array.isArray(list) ? list : []); showToast("Сообщение продавцу отправлено");
+    } catch (reason) { setActionError(reason instanceof Error ? reason.message : "Сообщение не отправлено"); }
+    finally { setActing(false); }
+  }
+
+  async function verifyDealTransaction(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const hash = String(new FormData(event.currentTarget).get("transaction_hash") || "").trim();
+    setDealLoading(true); setActionError("");
+    try {
+      const response = await fetch("/api/ethereum", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ transaction_hash: hash }) });
+      const payload = await response.json() as { payment?: PaymentDetails; error?: string };
+      if (!response.ok || !payload.payment) throw new Error(payload.error || "Транзакция не проверена");
+      setDealPayment(payload.payment);
+    } catch (reason) { setActionError(reason instanceof Error ? reason.message : "Не удалось проверить транзакцию"); }
+    finally { setDealLoading(false); }
   }
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
@@ -303,8 +359,8 @@ export function MarketplaceApp() {
     finally { setActing(false); }
   }
 
-  async function sendSepoliaPayment() {
-    if (!agentPayment || paymentSending) return;
+  async function sendSepoliaPayment(payment: PaymentDetails | null = agentPayment, source: "agent" | "deal" = "agent") {
+    if (!payment || paymentSending) return;
     const ethereum = (window as typeof window & { ethereum?: EthereumProvider }).ethereum;
     if (!ethereum) { setAgentError("Установите браузерный Ethereum-кошелёк, например MetaMask, и включите сеть Sepolia."); return; }
     setPaymentSending(true); setAgentError("");
@@ -317,11 +373,22 @@ export function MarketplaceApp() {
         if ((reason as { code?: number })?.code !== 4902) throw reason;
         await ethereum.request({ method: "wallet_addEthereumChain", params: [{ chainId: "0xaa36a7", chainName: "Sepolia", nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 }, rpcUrls: ["https://ethereum-sepolia-rpc.publicnode.com"], blockExplorerUrls: ["https://sepolia.etherscan.io"] }] });
       }
-      const hash = await ethereum.request({ method: "eth_sendTransaction", params: [{ from, to: agentPayment.address, value: agentPayment.value_wei_hex }] });
+      const hash = await ethereum.request({ method: "eth_sendTransaction", params: [{ from, to: payment.address, value: payment.value_wei_hex }] });
       if (typeof hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(hash)) throw new Error("Кошелёк не вернул хэш транзакции");
       const explorerUrl = `https://sepolia.etherscan.io/tx/${hash}`;
-      setAgentPayment({ ...agentPayment, transaction: { hash, status: "pending", recipient_matches: true, amount_eth: agentPayment.amount_eth, explorer_url: explorerUrl } });
-      setAgentMessages((current) => [...current, { role: "assistant", content: `Тестовый перевод ${agentPayment.amount_eth} SepoliaETH отправлен. Хэш транзакции: ${hash}. Статус пока ожидает подтверждения в блокчейне.` }].slice(-18));
+      const nextPayment = { ...payment, transaction: { hash, status: "pending" as const, recipient_matches: true, amount_eth: payment.amount_eth, explorer_url: explorerUrl } };
+      if (source === "agent") setAgentPayment(nextPayment); else setDealPayment(nextPayment);
+      const report = `Тестовый перевод ${payment.amount_eth} SepoliaETH отправлен. Хэш транзакции: ${hash}. Статус пока ожидает подтверждения в блокчейне.`;
+      setAgentMessages((current) => [...current, { role: "assistant", content: report }].slice(-18));
+      if (source === "deal" && selected) {
+        try {
+          const args: Record<string, unknown> = { product_id: selected.id, text: report };
+          if (selected.seller_id) args.receiver_id = selected.seller_id;
+          await mcpCall("send_message", args);
+          const list = await mcpCall<Message[]>("get_messages", { product_id: selected.id, limit: 100 });
+          setDealMessages(Array.isArray(list) ? list : []);
+        } catch { setAgentError("Перевод отправлен, но сообщение с хэшем не доставлено продавцу. Скопируйте хэш из блока сделки."); }
+      }
       showToast("Тестовый перевод отправлен");
     } catch (reason) { setAgentError(reason instanceof Error ? reason.message : "Не удалось отправить тестовый перевод"); }
     finally { setPaymentSending(false); }
@@ -522,7 +589,7 @@ export function MarketplaceApp() {
 
     <section className="catalog" aria-labelledby="catalog-title">
       <div className="section-heading"><div><p className="eyebrow">Свежее в ленте</p><h2 id="catalog-title">Новое рядом</h2></div>{!loading && !error && <span>{products.length} предложений</span>}</div>
-      {error ? <div className="notice error"><strong>Каталог не загрузился</strong><span>{error}</span><button type="button" onClick={() => void loadProducts()}>Повторить</button></div> : loading ? <div className="product-grid" aria-label="Загрузка">{Array.from({ length: 8 }).map((_, index) => <div className="product-card skeleton" key={index} />)}</div> : products.length === 0 ? <div className="notice"><strong>Ничего не нашли</strong><span>Попробуйте изменить запрос или категорию.</span></div> : <div className="product-grid">{products.map((product) => <article className="product-card" key={product.id}><button className={`product-image category-${product.category}`} onClick={() => { setSelected(product); setPanel("product"); }} type="button">{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Находка"}</span>}<i aria-hidden="true">♡</i></button><div className="product-info"><span className="product-category">{categoryNames[product.category] || product.category}</span><h3>{product.title}</h3><strong>{money(product.price)}</strong><div className="card-actions"><button className="card-link" onClick={() => { setSelected(product); setPanel("product"); }} type="button">Посмотреть <span aria-hidden="true">↗</span></button><button className="message-link" aria-label={`Написать по объявлению «${product.title}»`} onClick={() => void openMessages({ productId: product.id, productTitle: product.title })} type="button"><span aria-hidden="true">○</span> Написать</button></div></div></article>)}</div>}
+      {error ? <div className="notice error"><strong>Каталог не загрузился</strong><span>{error}</span><button type="button" onClick={() => void loadProducts()}>Повторить</button></div> : loading ? <div className="product-grid" aria-label="Загрузка">{Array.from({ length: 8 }).map((_, index) => <div className="product-card skeleton" key={index} />)}</div> : products.length === 0 ? <div className="notice"><strong>Ничего не нашли</strong><span>Попробуйте изменить запрос или категорию.</span></div> : <div className="product-grid">{products.map((product) => <article className="product-card" key={product.id}><button className={`product-image category-${product.category}`} onClick={() => void openProduct(product)} type="button">{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Находка"}</span>}<i aria-hidden="true">♡</i></button><div className="product-info"><span className="product-category">{categoryNames[product.category] || product.category}</span><h3>{product.title}</h3><strong>{money(product.price)}</strong><div className="card-actions"><button className="card-link" onClick={() => void openProduct(product)} type="button">Посмотреть <span aria-hidden="true">↗</span></button><button className="message-link" aria-label={`Написать по объявлению «${product.title}»`} onClick={() => void openMessages({ productId: product.id, productTitle: product.title })} type="button"><span aria-hidden="true">○</span> Написать</button></div></div></article>)}</div>}
     </section>
 
     <section className="trust-band"><div><span className="trust-number">01</span><strong>Живые объявления</strong><p>Каталог обновляется напрямую с платформы.</p></div><div><span className="trust-number">02</span><strong>Диалог до сделки</strong><p>Задайте продавцу вопросы в личных сообщениях.</p></div><div><span className="trust-number">03</span><strong>Понятный заказ</strong><p>Создайте, подтвердите или отмените сделку.</p></div></section>
@@ -539,7 +606,7 @@ export function MarketplaceApp() {
       <section className="agent-workspace"><div className="agent-chat" aria-live="polite">{agentMessages.map((message, index) => <article className={`agent-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "assistant" ? "Р" : "Вы"}</span><p>{message.content}</p></article>)}{agentSending && <article className="agent-message assistant thinking"><span>Р</span><p>Ищу и сравниваю…</p></article>}</div>
         {agentError && <p className="inline-error">{agentError}</p>}
         {agentPayment && <div className="agent-payment"><div className="agent-payment-head"><div><span>Тестовая сеть</span><strong>Ethereum Sepolia</strong></div><i>не реальные деньги</i></div><div className="agent-payment-address"><small>Кошелёк получателя</small><code>{agentPayment.address}</code></div><div className="agent-payment-meta"><span>Сумма <strong>{agentPayment.amount_eth} SepoliaETH</strong></span><a href={agentPayment.explorer_url} target="_blank" rel="noreferrer">Кошелёк в Etherscan ↗</a></div>{agentPayment.transaction && <div className={`agent-payment-status status-${agentPayment.transaction.status}`}><span>{agentPayment.transaction.status === "confirmed" ? "✓ Подтверждено" : agentPayment.transaction.status === "failed" ? "× Ошибка" : agentPayment.transaction.status === "not_found" ? "? Не найдено" : "◌ Ожидает подтверждения"}</span><code>{agentPayment.transaction.hash}</code><a href={agentPayment.transaction.explorer_url} target="_blank" rel="noreferrer">Открыть транзакцию ↗</a>{!agentPayment.transaction.recipient_matches && <strong>Адрес получателя не совпадает</strong>}</div>}<div className="agent-payment-actions"><button disabled={paymentSending} onClick={() => void sendSepoliaPayment()} type="button">{paymentSending ? "Откройте кошелёк…" : "Оплатить через кошелёк"}</button>{agentPayment.transaction && <button disabled={agentSending} onClick={() => void runAgentTask(`Проверь статус тестовой Sepolia-транзакции ${agentPayment.transaction?.hash}`)} type="button">Проверить статус</button>}<a href={agentPayment.faucet_url} target="_blank" rel="noreferrer">Где взять тестовый ETH</a></div></div>}
-        {agentProducts.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Найденные предложения</strong><span>{agentProducts.length}</span></div><div className="agent-product-strip">{agentProducts.map((product) => <article className="agent-product-card" key={product.id}><button className={`agent-product-image category-${product.category}`} onClick={() => { setSelected(product); setPanel("product"); }} type="button">{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Товар"}</span>}<i>{statusNames[product.status || "ACTIVE"] || product.status}</i></button><div><small>{categoryNames[product.category] || product.category}</small><h3>{product.title}</h3><strong>{money(product.price)}</strong><div className="agent-card-actions"><button onClick={() => { setSelected(product); setPanel("product"); }} type="button">Карточка</button>{product.status === "ACTIVE" && <button disabled={acting} onClick={() => void createAgentOrder(product)} type="button">Создать заказ</button>}</div></div></article>)}</div></div>}
+        {agentProducts.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Найденные предложения</strong><span>{agentProducts.length}</span></div><div className="agent-product-strip">{agentProducts.map((product) => <article className="agent-product-card" key={product.id}><button className={`agent-product-image category-${product.category}`} onClick={() => void openProduct(product)} type="button">{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Товар"}</span>}<i>{statusNames[product.status || "ACTIVE"] || product.status}</i></button><div><small>{categoryNames[product.category] || product.category}</small><h3>{product.title}</h3><strong>{money(product.price)}</strong><div className="agent-card-actions"><button onClick={() => void openProduct(product)} type="button">Карточка</button>{product.status === "ACTIVE" && <button disabled={acting} onClick={() => void createAgentOrder(product)} type="button">Создать заказ</button>}</div></div></article>)}</div></div>}
         {agentOffers.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Сообщения и предложения</strong><span>{agentOffers.length}</span></div><div className="agent-offer-list">{agentOffers.map((offer) => { const listed = Number(offer.product.price); const belowPrice = offer.offered_price !== undefined && offer.offered_price < listed; return <article className={belowPrice ? "agent-offer below-price" : "agent-offer"} key={offer.message.id}><div className="agent-offer-head"><div><span className={`status-badge status-${offer.product.status?.toLowerCase()}`}>{statusNames[offer.product.status || "ACTIVE"]}</span><strong>{offer.product.title}</strong></div><div><small>Цена объявления</small><strong>{money(offer.product.price)}</strong></div></div><blockquote>{offer.message.text}</blockquote>{offer.offered_price !== undefined && <div className="agent-price-check"><span>Предложение покупателя</span><strong>{money(offer.offered_price)}</strong>{belowPrice && <i>ниже на {money(listed - offer.offered_price)}</i>}</div>}<div className="agent-offer-actions"><button disabled={acting} onClick={() => void replyAboutAvailability(offer)} type="button">Ответить о наличии</button>{!offer.order && offer.offered_price !== undefined && <button disabled={acting} onClick={() => void requestOrderForOffer(offer)} type="button">Попросить создать заказ</button>}{offer.order?.status === "CREATED" && <button disabled={acting} onClick={() => void reserveAgentOffer(offer)} type="button">Поставить в резерв</button>}{offer.order?.status === "ACCEPTED" && <button disabled={acting} onClick={() => void approveAgentOffer(offer)} type="button">Разрешить продажу</button>}{offer.order && ["CREATED", "ACCEPTED"].includes(offer.order.status) && <button className="danger-action" disabled={acting} onClick={() => void declineAgentOffer(offer)} type="button">Отказать</button>}</div></article>; })}</div><p className="agent-order-note">Временный режим: предложенная цена фиксируется в сообщениях. MCP-заказ по-прежнему хранит цену объявления.</p></div>}
         {agentRelistCandidates.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>К перепродаже с наценкой 15%</strong><span>{agentRelistCandidates.length}</span></div><div className="agent-product-strip">{agentRelistCandidates.map((product) => <article className="agent-product-card" key={product.id}><div className={`agent-product-image category-${product.category}`}>{product.image ? <img src={product.image} alt="" /> : <span>{categoryNames[product.category] || "Товар"}</span>}<i>Куплено</i></div><div><small>{categoryNames[product.category] || product.category}</small><h3>{product.title}</h3><strong>{money(Math.round(Number(product.price) * 1.15 * 100) / 100)}</strong><div className="agent-card-actions single"><button disabled={acting} onClick={() => void relistPurchasedProduct(product)} type="button">Выставить на продажу</button></div></div></article>)}</div></div>}
         {agentSortedOrders.length > 0 && <div className="agent-results"><div className="agent-results-head"><strong>Входящие заказы</strong><span>{agentSortedOrders.length}</span></div><div className="agent-order-list">{agentSortedOrders.map((order) => <article className={order.id === bestAgentOrderId ? "agent-order recommended" : "agent-order"} key={order.id}><div>{order.id === bestAgentOrderId && <span className="agent-recommendation">Рекомендация агента</span>}<strong>{order.product?.title || `Заказ ${order.id.slice(0, 8)}`}</strong><small>{statusNames[order.status] || order.status} · {shortDate(order.created_at)}</small></div><div><strong>{order.product ? money(order.product.price) : "Цена объявления"}</strong>{order.status === "CREATED" && <button disabled={acting} onClick={() => void acceptAgentOrder(order)} type="button">Подтвердить</button>}</div></article>)}</div><p className="agent-order-note">MCP не хранит отдельную цену предложения: сравнение выполняется по цене объявления. При равенстве агент не обещает несуществующую выгоду.</p></div>}
@@ -547,7 +614,14 @@ export function MarketplaceApp() {
       </section>
     </div></Modal>}
 
-    {panel === "product" && selected && <Modal eyebrow={categoryNames[selected.category] || "Объявление"} title={selected.title} wide close={() => setPanel(null)}><div className="product-detail"><div className={`detail-image category-${selected.category}`}>{selected.image ? <img src={selected.image} alt={selected.title} /> : <span>{categoryNames[selected.category] || "Находка"}</span>}</div><div className="detail-copy"><span className="status-badge status-active">{statusNames[selected.status || "ACTIVE"]}</span><strong className="detail-price">{money(selected.price)}</strong><p>{selected.description || "Продавец пока не добавил описание."}</p><small>Объявление · {selected.id.slice(0, 8)}</small>{actionError && <p className="inline-error">{actionError}</p>}<div className="detail-actions"><button className="submit-action" disabled={acting} onClick={() => void createOrder(selected)} type="button">Создать заказ</button><button className="secondary-action" onClick={() => void openMessages({ productId: selected.id, productTitle: selected.title })} type="button">Написать продавцу</button></div></div></div></Modal>}
+    {panel === "product" && selected && <Modal eyebrow={categoryNames[selected.category] || "Объявление"} title={selected.title} wide close={() => setPanel(null)}>
+      <div className="product-detail"><div className={`detail-image category-${selected.category}`}>{selected.image ? <img src={selected.image} alt={selected.title} /> : <span>{categoryNames[selected.category] || "Находка"}</span>}</div><div className="detail-copy"><span className="status-badge status-active">{statusNames[selected.status || "ACTIVE"]}</span><strong className="detail-price">{money(selected.price)}</strong><p>{selected.description || "Продавец пока не добавил описание."}</p><small>Объявление · {selected.id.slice(0, 8)}</small><div className="detail-actions"><button className="submit-action" disabled={acting} onClick={() => void createOrder(selected)} type="button">Создать заказ</button><button className="secondary-action" onClick={() => document.getElementById("deal-chat")?.focus()} type="button">Написать продавцу</button></div></div></div>
+      <section className="blockchain-deal"><div className="deal-title"><div><span className="deal-lock" aria-hidden="true">◆</span><div><small>Защищённая тестовая сделка</small><h3>Оплата в блокчейне</h3></div></div><span className="deal-test-badge">Testnet</span></div>
+        {actionError && <p className="inline-error">{actionError}</p>}
+        <div className="deal-layout"><div className="deal-chat-panel"><div className="deal-panel-head"><div><strong>Чат с продавцом</strong><span>По этому объявлению</span></div><i aria-hidden="true">●</i></div><div className="deal-message-list">{dealLoading && dealMessages.length === 0 ? <p className="deal-placeholder">Загружаем переписку…</p> : dealMessages.length === 0 ? <p className="deal-placeholder">Сообщений пока нет. Уточните детали передачи или оплаты.</p> : dealMessages.map((message) => <article className={message.sender_id === profile?.id ? "mine" : ""} key={message.id}><p>{message.text}</p><small>{shortDate(message.created_at)}</small></article>)}</div><form className="deal-message-form" onSubmit={sendDealMessage}><input id="deal-chat" name="deal_message" required maxLength={4000} placeholder="Сообщение продавцу" /><button disabled={acting} type="submit" aria-label="Отправить сообщение">↑</button></form></div>
+          <div className="deal-settlement"><div className="deal-panel-head"><div><strong>Реквизиты сделки</strong><span>Публичные данные Sepolia</span></div><i aria-hidden="true">◇</i></div>{dealPayment ? <><dl className="deal-details"><div><dt>Номер счёта</dt><dd><code>{dealPayment.address}</code><a href={dealPayment.explorer_url} target="_blank" rel="noreferrer">↗</a></dd></div><div><dt>Валюта</dt><dd>{dealPayment.currency}</dd></div><div><dt>Сеть</dt><dd>{dealPayment.network}<span>Chain ID {dealPayment.chain_id}</span></dd></div><div><dt>Тестовая сумма</dt><dd>{dealPayment.amount_eth} ETH</dd></div></dl><div className="deal-buttons"><a className="deal-check-account" href={dealPayment.explorer_url} target="_blank" rel="noreferrer">Проверить счёт ↗</a><button disabled={paymentSending} onClick={() => void sendSepoliaPayment(dealPayment, "deal")} type="button">{paymentSending ? "Откройте кошелёк…" : "Оплатить тестовым ETH"}</button></div><form className="deal-verify" onSubmit={verifyDealTransaction}><label>Хэш транзакции<input name="transaction_hash" required pattern="^0x[0-9a-fA-F]{64}$" placeholder="0x…" /></label><button disabled={dealLoading} type="submit">{dealLoading ? "Проверяем…" : "Проверить сделку"}</button></form>{dealPayment.transaction && <div className={`deal-transaction status-${dealPayment.transaction.status}`}><strong>{dealPayment.transaction.status === "confirmed" ? "Транзакция подтверждена" : dealPayment.transaction.status === "pending" ? "Транзакция ожидает подтверждения" : dealPayment.transaction.status === "failed" ? "Транзакция завершилась ошибкой" : "Транзакция не найдена"}</strong><span>{dealPayment.transaction.recipient_matches ? "Получатель совпадает" : "Получатель не совпадает"}{dealPayment.transaction.block_number ? ` · блок ${dealPayment.transaction.block_number}` : ""}</span><a href={dealPayment.transaction.explorer_url} target="_blank" rel="noreferrer">Открыть в Etherscan ↗</a></div>}</> : <p className="deal-placeholder">Реквизиты временно недоступны.</p>}</div></div>
+      </section>
+    </Modal>}
 
     {panel === "orders" && <Modal eyebrow="Покупки и продажи" title="Мои заказы" wide close={() => setPanel(null)}><div className="panel-tabs">{[["all","Все"],["buyer","Покупаю"],["seller","Продаю"]].map(([value,label]) => <button className={orderRole === value ? "active" : ""} key={value} onClick={() => { setOrderRole(value); void openOrders(value); }} type="button">{label}</button>)}</div>{actionError && <p className="inline-error">{actionError}</p>}{panelLoading ? <div className="panel-loader">Загружаем заказы…</div> : <>{orderRole === "seller" && <section className="selling-products"><div className="subsection-heading"><div><span>Ваши объявления</span><strong>Выставлено на продажу</strong></div><span>{sellingProducts.length}</span></div>{sellingProducts.length === 0 ? <p className="subsection-empty">У вас пока нет выставленных товаров.</p> : <div className="selling-product-grid">{sellingProducts.map((product) => <article key={product.id}><button className={`selling-product-image category-${product.category}`} onClick={() => { setSelected(product); setPanel("product"); }} type="button">{product.image ? <img src={product.image} alt="" /> : categoryNames[product.category]}</button><div><span className={`status-badge status-${product.status?.toLowerCase()}`}>{statusNames[product.status || "ACTIVE"]}</span><strong>{product.title}</strong><small>{money(product.price)}</small></div><button onClick={() => void openMessages({ productId: product.id, productTitle: product.title })} type="button">Сообщения</button></article>)}</div>}</section>}{orders.length === 0 ? <EmptyState title={orderRole === "seller" ? "Входящих заказов пока нет" : "Заказов пока нет"} text={orderRole === "seller" ? "Ваши выставленные товары показаны выше. Новые предложения появятся здесь." : "Откройте понравившееся объявление и создайте заказ."} /> : <div className="order-list">{orders.map((order) => <article key={order.id}><div><span className={`status-badge status-${order.status.toLowerCase()}`}>{statusNames[order.status] || order.status}</span><h3>{order.product?.title || `Заказ ${order.id.slice(0, 8)}`}</h3><p>{shortDate(order.created_at)}</p></div><div className="item-actions">{order.status === "CREATED" && order.seller_id === profile?.id && <button disabled={acting} onClick={() => void changeOrder(order,"accept_order")} type="button">Подтвердить</button>}{order.status === "ACCEPTED" && <button disabled={acting} onClick={() => void changeOrder(order,"complete_order")} type="button">Завершить</button>}{["CREATED","ACCEPTED"].includes(order.status) && <button className="danger-action" disabled={acting} onClick={() => void changeOrder(order,"cancel_order")} type="button">Отменить</button>}<button onClick={() => void openMessages({ productId: order.product_id || order.product?.id || "", productTitle: order.product?.title, orderId: order.id })} type="button">Сообщения</button></div></article>)}</div>}</>}</Modal>}
 

@@ -56,9 +56,11 @@ test("uses the image MIME type required by the marketplace", async () => {
 });
 
 test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
-  const [agentRoute, app] = await Promise.all([
+  const [agentRoute, app, ethereumRoute, sepolia] = await Promise.all([
     readFile(new URL("../app/api/agent/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/MarketplaceApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/ethereum/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/sepolia.ts", import.meta.url), "utf8"),
   ]);
   assert.match(agentRoute, /process\.env\.DEEPSEEK_API_KEY/);
   assert.match(agentRoute, /deepseek-v4-flash/);
@@ -69,9 +71,10 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(agentRoute, /extractOfferPrice/);
   assert.match(agentRoute, /get_test_payment_details/);
   assert.match(agentRoute, /verify_test_payment/);
-  assert.match(agentRoute, /eth_getTransactionReceipt/);
-  assert.match(agentRoute, /recipient_matches/);
-  assert.match(agentRoute, /SEPOLIA_PAYMENT_ADDRESS/);
+  assert.match(ethereumRoute, /verifyTestPayment/);
+  assert.match(sepolia, /eth_getTransactionReceipt/);
+  assert.match(sepolia, /recipient_matches/);
+  assert.match(sepolia, /SEPOLIA_PAYMENT_ADDRESS/);
   assert.doesNotMatch(app, /SEPOLIA_PAYMENT_PRIVATE_KEY/);
   assert.doesNotMatch(app, /DEEPSEEK_API_KEY|api\.deepseek\.com/);
   assert.match(app, /Агент по покупкам/);
@@ -91,4 +94,8 @@ test("keeps the DeepSeek agent server-side and MCP-driven", async () => {
   assert.match(app, /eth_sendTransaction/);
   assert.match(app, /Тестовая оплата ETH/);
   assert.match(app, /Проверить статус/);
+  assert.match(app, /Оплата в блокчейне/);
+  assert.match(app, /Чат с продавцом/);
+  assert.match(app, /Проверить счёт/);
+  assert.match(app, /verifyDealTransaction/);
 });

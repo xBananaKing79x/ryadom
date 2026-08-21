@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { NextResponse } from "next/server";
-import { formatEther, getAddress, isAddress, isHash } from "viem";
+import { getTestPaymentDetails, PaymentDetails, verifyTestPayment } from "../../../lib/sepolia";
 
 export const dynamic = "force-dynamic";
 
@@ -13,45 +13,9 @@ type Product = { id: string; title: string; description?: string; price: number 
 type Order = { id: string; product_id?: string; status: string; product?: Product; created_at?: string; buyer_id?: string; seller_id?: string };
 type Message = { id: string; product_id?: string; order_id?: string; sender_id?: string; receiver_id?: string; text: string; created_at?: string };
 type AgentOffer = { message: Message; product: Product; order?: Order; offered_price?: number };
-type PaymentDetails = { network: "Sepolia"; chain_id: 11155111; address: string; amount_eth: string; value_wei_hex: string; explorer_url: string; faucet_url: string; transaction?: { hash: string; status: "pending" | "confirmed" | "failed" | "not_found"; recipient_matches: boolean; amount_eth?: string; block_number?: number; explorer_url: string } };
 
 const mcpEndpoint = process.env.MCP_SERVER_URL || "https://ai-hackaton.ru/mcp";
 const allowedAgentTools = new Set(["search_products", "get_product", "get_my_products", "get_my_orders"]);
-const sepoliaChainId = 11155111 as const;
-const sepoliaAmountEth = "0.0001";
-const sepoliaValueWeiHex = "0x5af3107a4000";
-
-function paymentAddress() {
-  const value = process.env.SEPOLIA_PAYMENT_ADDRESS || "";
-  if (!isAddress(value)) throw new Error("Тестовый платёжный адрес пока не настроен");
-  return getAddress(value);
-}
-
-function getTestPaymentDetails(): PaymentDetails {
-  const address = paymentAddress();
-  return { network: "Sepolia", chain_id: sepoliaChainId, address, amount_eth: sepoliaAmountEth, value_wei_hex: sepoliaValueWeiHex, explorer_url: `https://sepolia.etherscan.io/address/${address}`, faucet_url: "https://ethereum.org/developers/docs/networks/#sepolia" };
-}
-
-async function verifyTestPayment(hashValue: unknown): Promise<PaymentDetails> {
-  const hash = typeof hashValue === "string" ? hashValue.trim() : "";
-  if (!isHash(hash)) throw new Error("Нужен полный Ethereum-хэш вида 0x… длиной 66 символов");
-  const details = getTestPaymentDetails();
-  const rpcUrl = process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com";
-  const rpc = async (method: string) => {
-    const response = await fetch(rpcUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: [hash] }) });
-    if (!response.ok) throw new Error("Не удалось связаться с сетью Sepolia");
-    const payload = await response.json() as { result?: Record<string, string> | null; error?: { message?: string } };
-    if (payload.error) throw new Error(payload.error.message || "Sepolia RPC отклонил запрос");
-    return payload.result || null;
-  };
-  const [transaction, receipt] = await Promise.all([rpc("eth_getTransactionByHash"), rpc("eth_getTransactionReceipt")]);
-  const explorerUrl = `https://sepolia.etherscan.io/tx/${hash}`;
-  if (!transaction) return { ...details, transaction: { hash, status: "not_found", recipient_matches: false, explorer_url: explorerUrl } };
-  const recipientMatches = typeof transaction.to === "string" && transaction.to.toLowerCase() === details.address.toLowerCase();
-  const value = typeof transaction.value === "string" ? transaction.value : undefined;
-  const status = !receipt ? "pending" : receipt.status === "0x1" ? "confirmed" : "failed";
-  return { ...details, transaction: { hash, status, recipient_matches: recipientMatches, amount_eth: value ? formatEther(BigInt(value)) : undefined, block_number: receipt?.blockNumber ? Number(BigInt(receipt.blockNumber)) : undefined, explorer_url: explorerUrl } };
-}
 
 const tools = [
   {
