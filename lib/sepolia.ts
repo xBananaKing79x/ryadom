@@ -1,4 +1,4 @@
-import { createWalletClient, formatEther, getAddress, http, isAddress, isHash, parseEther } from "viem";
+import { createPublicClient, createWalletClient, formatEther, getAddress, http, isAddress, isHash, parseEther } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { sepolia } from "viem/chains";
 
@@ -67,6 +67,19 @@ export type SentTestPayment = {
   explorer_url: string;
 };
 
+export type PaymentTotal = {
+  expected_amount_eth: string;
+  total_sent_eth: string;
+  total_received_eth: string;
+  total_finalized_eth: string;
+  remaining_amount_eth: string;
+  remaining_received_eth: string;
+  total_sent_matches: boolean;
+  total_finalized_matches: boolean;
+  has_pending: boolean;
+  payments: PaymentDetails[];
+};
+
 export function getTestPaymentDetails(amountValue: unknown = amountEth): PaymentDetails {
   const configured = process.env.SEPOLIA_PAYMENT_ADDRESS || "";
   if (!isAddress(configured)) throw new Error("Тестовый платёжный адрес пока не настроен");
@@ -92,10 +105,55 @@ export async function sendTestPayment(recipientValue: unknown, amountValue: unkn
   const account = privateKeyToAccount(configuredKey as `0x${string}`);
   const rpcUrl = process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com";
   const client = createWalletClient({ account, chain: sepolia, transport: http(rpcUrl) });
+  const publicClient = createPublicClient({ chain: sepolia, transport: http(rpcUrl) });
   const to = getAddress(recipient);
   const expectedAmount = normalizedAmount(amountValue);
-  const hash = await client.sendTransaction({ account, chain: sepolia, to, value: parseEther(expectedAmount) });
+  const value = parseEther(expectedAmount);
+  const [balance, fees] = await Promise.all([publicClient.getBalance({ address: account.address }), publicClient.estimateFeesPerGas()]);
+  const gasPrice = fees.maxFeePerGas ?? fees.gasPrice ?? 0n;
+  const gasReserve = 21_000n * gasPrice;
+  if (value + gasReserve > balance) {
+    const spendable = balance > gasReserve ? balance - gasReserve : 0n;
+    throw new Error(`Недостаточно SepoliaETH: доступно для оплаты ${formatEther(spendable)} ETH с учётом комиссии, требуется ${expectedAmount} ETH`);
+  }
+  const hash = await client.sendTransaction({ account, chain: sepolia, to, value });
   return { hash, from: account.address, to, amount_eth: expectedAmount, explorer_url: `https://sepolia.etherscan.io/tx/${hash}` };
+}
+
+export async function verifyPaymentTotal(hashValues: unknown[], expected: { address?: unknown; amount_eth?: unknown }): Promise<PaymentTotal> {
+  const hashes = [...new Set(hashValues.filter((value): value is string => typeof value === "string" && isHash(value)))];
+  const expectedAmount = normalizedAmount(expected.amount_eth);
+  const expectedWei = parseEther(expectedAmount);
+  const payments = await Promise.all(hashes.map((hash) => verifyTestPayment(hash, { address: expected.address, amount_eth: "0.000000000000000001" })));
+  let sentWei = 0n;
+  let receivedWei = 0n;
+  let finalizedWei = 0n;
+  let hasPending = false;
+  for (const payment of payments) {
+    const transaction = payment.transaction;
+    if (!transaction?.amount_eth || ["failed", "not_found"].includes(transaction.status)) continue;
+    const value = parseEther(transaction.amount_eth);
+    sentWei += value;
+    if (transaction.recipient_matches) {
+      receivedWei += value;
+      if (transaction.status === "confirmed" && transaction.finalized) finalizedWei += value;
+      else hasPending = true;
+    }
+  }
+  const remainingWei = sentWei >= expectedWei ? 0n : expectedWei - sentWei;
+  const remainingReceivedWei = receivedWei >= expectedWei ? 0n : expectedWei - receivedWei;
+  return {
+    expected_amount_eth: expectedAmount,
+    total_sent_eth: formatEther(sentWei),
+    total_received_eth: formatEther(receivedWei),
+    total_finalized_eth: formatEther(finalizedWei),
+    remaining_amount_eth: formatEther(remainingWei),
+    remaining_received_eth: formatEther(remainingReceivedWei),
+    total_sent_matches: sentWei >= expectedWei,
+    total_finalized_matches: finalizedWei >= expectedWei,
+    has_pending: hasPending,
+    payments,
+  };
 }
 
 export async function verifyTestPayment(hashValue: unknown, expected?: { address?: unknown; amount_eth?: unknown }): Promise<PaymentDetails> {
